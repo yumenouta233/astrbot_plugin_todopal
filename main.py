@@ -32,9 +32,9 @@ class TodoPalPlugin(Star):
         # In-memory session state: {unified_msg_origin: {'state': str, 'todos': list, 'pending_date': str}}
         self.sessions = {}
 
-    def _format_preview(self, todos: list) -> str:
+    def _format_preview(self, todos: list, include_confirm_prompt: bool = True) -> str:
         """
-        Format todos for user confirmation.
+        Format todos for user confirmation or display.
         """
         grouped = {}
         for todo in todos:
@@ -59,28 +59,47 @@ class TodoPalPlugin(Star):
             for i, item in enumerate(items, 1):
                 time = item.get("time")
                 content = item.get("content", "")
+                status = item.get("status", "pending")
+                
                 prefix = f"{time} " if time else ""
-                result_lines.append(f"{i}. {prefix}{content}")
+                check_mark = "✅ " if status == "done" else ""
+                
+                result_lines.append(f"{i}. {check_mark}{prefix}{content}")
             result_lines.append("")
         
-        result_lines.append("如果正确，请回复“确认”。")
+        if include_confirm_prompt:
+            result_lines.append("如果正确，请回复“确认”。")
         return "\n".join(result_lines)
 
-    @filter.regex(r"^todo\s+(.*)")
+    @filter.regex(r"^(todo|add|done)\s+(.*)")
     async def todo_parse(self, event: AstrMessageEvent):
         """
-        Parse todo items from user input starting with 'todo'.
+        Parse todo items from user input starting with 'todo', 'add', or 'done'.
         """
         message_str = event.message_str
-        match = re.match(r"^todo\s+(.*)", message_str, re.IGNORECASE)
+        match = re.match(r"^(todo|add|done)\s+(.*)", message_str, re.IGNORECASE)
         if not match:
              return
 
-        todo_content = match.group(1).strip()
+        command_prefix = match.group(1).lower()
+        todo_content = match.group(2).strip()
+        
         if not todo_content:
-            yield event.plain_result("请输入待办事项内容。")
+            yield event.plain_result(f"请输入{command_prefix}的具体内容。")
             return
 
+        user_id = event.get_sender_id()
+        try:
+            platform = event.unified_msg_origin.split(":")[0]
+        except (AttributeError, IndexError):
+            platform = "unknown"
+
+        # --- Handle 'done' command ---
+        if command_prefix == 'done':
+            await self._handle_done_command(event, platform, user_id, todo_content)
+            return
+
+        # --- Handle 'todo' and 'add' commands (require LLM) ---
         # Get LLM Provider ID
         try:
             umo = event.unified_msg_origin
@@ -106,46 +125,27 @@ class TodoPalPlugin(Star):
             yield event.plain_result("未能识别到任何待办事项。")
             return
 
-        # Check existing data (Simplification: just check the first date found for append/overwrite logic)
-        # In multi-date scenario, we might just ask confirmation and handle merge internally.
-        # But requirement says: "如果今天对应日期已经有待办数据... 提示用户选择：追加/覆盖"
-        
-        # We'll check if ANY of the dates have existing data.
-        dates_with_data = []
-        user_id = event.get_sender_id()
-        # Fix platform name extraction: platform_name might not exist on event directly
-        # Try unified_msg_origin first: "platform:..."
-        try:
-            platform = event.unified_msg_origin.split(":")[0]
-        except (AttributeError, IndexError):
-            # Fallback
-            platform = "unknown"
-        
-        for todo in todos:
-            d = todo.get("date")
-            if d:
-                existing = self.storage.load_todos(platform, user_id, d)
-                if existing and d not in dates_with_data:
-                    dates_with_data.append(d)
+        # 'todo' prefix means overwrite (new list), 'add' means append
+        action_type = 'overwrite' if command_prefix == 'todo' else 'append'
         
         # Store session state
         self.sessions[event.unified_msg_origin] = {
-            'state': 'WAITING_CHOICE' if dates_with_data else 'WAITING_CONFIRM',
+            'state': 'WAITING_CONFIRM',
+            'action_type': action_type,
             'todos': todos,
             'source_text': todo_content,
             'platform': platform,
             'user_id': user_id
         }
 
-        preview = self._format_preview(todos)
+        preview = self._format_preview(todos, include_confirm_prompt=True)
         
-        if dates_with_data:
-            # Append prompt for choice
-            yield event.plain_result(f"{preview}\n\n检测到日期 {'、'.join(dates_with_data)} 已有待办。\n请回复“追加”或“覆盖”。")
+        if command_prefix == 'todo':
+            yield event.plain_result(f"【新建/覆盖模式】\n{preview}")
         else:
-            yield event.plain_result(preview)
+            yield event.plain_result(f"【追加模式】\n{preview}")
 
-    @filter.regex(r"^(确认|追加|覆盖|取消)$")
+    @filter.regex(r"^(确认|取消)$")
     async def handle_confirmation(self, event: AstrMessageEvent):
         """
         Handle confirmation or choice selection.
@@ -169,21 +169,12 @@ class TodoPalPlugin(Star):
 
         if state == 'WAITING_CONFIRM':
             if action == "确认":
-                self._save_todos(platform, user_id, todos, source_text, mode='append') # Default append for new files
+                mode = session.get('action_type', 'append')
+                self._save_todos(platform, user_id, todos, source_text, mode=mode)
                 del self.sessions[event.unified_msg_origin]
                 yield event.plain_result("已保存待办事项。")
             else:
-                # Should not happen due to regex, but safe fallback
                 yield event.plain_result("请回复“确认”或“取消”。")
-
-        elif state == 'WAITING_CHOICE':
-            if action in ["追加", "覆盖"]:
-                mode = 'append' if action == "追加" else 'overwrite'
-                self._save_todos(platform, user_id, todos, source_text, mode=mode)
-                del self.sessions[event.unified_msg_origin]
-                yield event.plain_result(f"已{action}待办事项。")
-            else:
-                yield event.plain_result("请回复“追加”、“覆盖”或“取消”。")
 
     def _save_todos(self, platform, user_id, todos, source_text, mode='append'):
         # Group by date first
@@ -209,40 +200,38 @@ class TodoPalPlugin(Star):
             else:
                 self.storage.append_todos(platform, user_id, date, items)
 
-    @filter.regex(r"(?:第(\d+)个|(.*))(?:做完了|完成了|完成|已完成)")
-    async def handle_completion(self, event: AstrMessageEvent):
+    async def _handle_done_command(self, event: AstrMessageEvent, platform: str, user_id: str, content: str):
         """
-        Handle marking todos as done.
-        Matches: "第2个做完了", "买菜做完了"
+        Handle marking todos as done using the 'done' prefix.
+        Matches: "done 1, 2", "done 买菜"
         """
-        # This regex is a bit broad, need to be careful not to conflict
-        # But for plugin specific logic it should be fine.
-        msg = event.message_str.strip()
-        
-        # Assume we are operating on TODAY's todo list by default
-        # or we could search recent files. For simplicity, requirement implies context but doesn't specify date.
-        # "第2个做完了" implies a visible list. Usually users refer to today's list.
         today = datetime.now().strftime("%Y-%m-%d")
-        user_id = event.get_sender_id()
-        try:
-            platform = event.unified_msg_origin.split(":")[0]
-        except (AttributeError, IndexError):
-            platform = "unknown"
-
+        
+        # Determine target date: If user specified a date like "done 昨天 1", we could parse it,
+        # but for simplicity and common use cases, we default to today's list.
         todos = self.storage.load_todos(platform, user_id, today)
         if not todos:
-            yield event.plain_result("今天没有待办事项哦。")
+            yield event.plain_result(f"今天没有待办事项哦。")
             return
 
-        match = TodoMatcher.match_todo(todos, msg)
-        idx, item = match
+        matched_indices = TodoMatcher.match_todos(todos, content)
         
-        if item:
-            if item['status'] == 'done':
-                 yield event.plain_result(f"“{item['content']}” 已经是完成状态啦。")
-                 return
-            
-            self.storage.update_todo_status(platform, user_id, today, idx, 'done')
-            yield event.plain_result(f"太棒了！已将“{item['content']}”标记为完成。")
-        else:
-            yield event.plain_result("找不到对应的待办事项，请检查描述是否准确。")
+        if not matched_indices:
+            yield event.plain_result("找不到对应的待办事项，请检查描述或序号是否准确。")
+            return
+
+        updated_items = []
+        for idx in matched_indices:
+            if todos[idx]['status'] != 'done':
+                self.storage.update_todo_status(platform, user_id, today, idx, 'done')
+                updated_items.append(todos[idx]['content'])
+        
+        if not updated_items:
+            yield event.plain_result("所选的待办事项已经是完成状态啦。")
+            return
+
+        # Reload to get the fresh state and format it
+        fresh_todos = self.storage.load_todos(platform, user_id, today)
+        preview = self._format_preview(fresh_todos, include_confirm_prompt=False)
+        
+        yield event.plain_result(f"太棒了！已更新状态：\n\n{preview}")

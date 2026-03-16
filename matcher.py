@@ -7,50 +7,49 @@ class TodoMatcher:
     """
 
     @staticmethod
-    def match_todo(todos: List[Dict], query: str) -> Tuple[Optional[int], Optional[Dict]]:
+    def match_todos(todos: List[Dict], query: str) -> List[int]:
         """
-        Find a todo item based on user query.
+        Find multiple todo items based on user query (e.g. after 'done' prefix).
         
         Supported queries:
-        1. "第X个" -> Matches index X-1.
-        2. "XX做完了" -> Matches content containing XX.
+        1. Comma/space separated indices: "1, 2, 3" or "1 2"
+        2. "第X个", "第X条"
+        3. Content matching: "买菜"
 
         Args:
             todos: List of todo items.
-            query: User input string (e.g., "第2个做完了", "买菜做完了").
+            query: User input string.
 
         Returns:
-            Tuple (index, todo_item) if match found, else (None, None).
+            List of matched indices (0-based).
         """
-        if not todos:
-            return None, None
+        if not todos or not query:
+            return []
 
-        # 1. Try to match "第X个"
-        # Regex for "第X个" or just "X" if it's explicitly about index (though query might be mixed)
-        index_match = re.search(r"第(\d+)个", query)
-        if index_match:
+        matched_indices = set()
+        
+        # 1. Try to extract numbers (e.g., "1, 2", "1 2 3", "第1个", "第2条")
+        # Find all digit sequences that might represent an index
+        numbers = re.findall(r'\d+', query)
+        for num_str in numbers:
             try:
-                idx = int(index_match.group(1)) - 1  # Convert 1-based to 0-based
+                idx = int(num_str) - 1
                 if 0 <= idx < len(todos):
-                    return idx, todos[idx]
+                    matched_indices.add(idx)
             except ValueError:
                 pass
+                
+        if matched_indices:
+            return list(matched_indices)
 
-        # 2. Try to match by content
-        # Remove "做完了", "完成了", "完成" from the end of the query to get the core content
-        clean_query = re.sub(r"(做完了|完成了|完成|已完成)$", "", query).strip()
-        
+        # 2. Try to match by content if no numbers were found
+        clean_query = query.strip()
         if not clean_query:
-            return None, None
+            return []
 
         # Simple substring match
-        candidates = []
         for i, todo in enumerate(todos):
             if clean_query in todo['content']:
-                candidates.append((i, todo))
-        
-        if len(candidates) == 1:
-            return candidates[0]
-        
-        # If multiple matches or no match, return None for now (or handle ambiguity later)
-        return None, None
+                matched_indices.add(i)
+                
+        return list(matched_indices)
