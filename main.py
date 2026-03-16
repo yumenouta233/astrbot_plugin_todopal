@@ -92,7 +92,7 @@ class TodoPalPlugin(Star):
 
         # --- Handle 'check' command ---
         if command_prefix == 'check':
-            await self._handle_check_command(event, platform, user_id)
+            yield await self._handle_check_command(event, platform, user_id)
             return
 
         if not todo_content:
@@ -101,12 +101,12 @@ class TodoPalPlugin(Star):
 
         # --- Handle 'done' command ---
         if command_prefix == 'done':
-            await self._handle_done_command(event, platform, user_id, todo_content)
+            yield await self._handle_done_command(event, platform, user_id, todo_content)
             return
 
         # --- Handle 'fix' command ---
         if command_prefix == 'fix':
-            await self._handle_fix_command(event, platform, user_id, todo_content)
+            yield await self._handle_fix_command(event, platform, user_id, todo_content)
             return
 
         # --- Handle 'todo' and 'add' commands (require LLM) ---
@@ -224,18 +224,14 @@ class TodoPalPlugin(Star):
         """
         today = datetime.now().strftime("%Y-%m-%d")
         
-        # Determine target date: If user specified a date like "done 昨天 1", we could parse it,
-        # but for simplicity and common use cases, we default to today's list.
         todos = self.storage.load_todos(platform, user_id, today)
         if not todos:
-            yield event.plain_result(f"今天没有待办事项哦。")
-            return
+            return event.plain_result(f"今天没有待办事项哦。")
 
         matched_indices = TodoMatcher.match_todos(todos, content)
         
         if not matched_indices:
-            yield event.plain_result("找不到对应的待办事项，请检查描述或序号是否准确。")
-            return
+            return event.plain_result("找不到对应的待办事项，请检查描述或序号是否准确。")
 
         updated_items = []
         for idx in matched_indices:
@@ -244,14 +240,13 @@ class TodoPalPlugin(Star):
                 updated_items.append(todos[idx]['content'])
         
         if not updated_items:
-            yield event.plain_result("所选的待办事项已经是完成状态啦。")
-            return
+            return event.plain_result("所选的待办事项已经是完成状态啦。")
 
         # Reload to get the fresh state and format it
         fresh_todos = self.storage.load_todos(platform, user_id, today)
         preview = self._format_preview(fresh_todos, include_confirm_prompt=False)
         
-        yield event.plain_result(f"太棒了！已更新状态：\n\n{preview}")
+        return event.plain_result(f"太棒了！已更新状态：\n\n{preview}")
 
     async def _handle_check_command(self, event: AstrMessageEvent, platform: str, user_id: str):
         """
@@ -261,11 +256,10 @@ class TodoPalPlugin(Star):
         todos = self.storage.load_todos(platform, user_id, today)
         
         if not todos:
-            yield event.plain_result("今天还没有待办事项哦。")
-            return
+            return event.plain_result("今天还没有待办事项哦。")
             
         preview = self._format_preview(todos, include_confirm_prompt=False)
-        yield event.plain_result(f"今日待办清单：\n\n{preview}")
+        return event.plain_result(f"今日待办清单：\n\n{preview}")
 
     async def _handle_fix_command(self, event: AstrMessageEvent, platform: str, user_id: str, content: str):
         """
@@ -276,29 +270,23 @@ class TodoPalPlugin(Star):
         todos = self.storage.load_todos(platform, user_id, today)
         
         if not todos:
-            yield event.plain_result("今天没有待办事项，无法修改。")
-            return
+            return event.plain_result("今天没有待办事项，无法修改。")
 
         # Parse index and content
-        # Try to find the number at the beginning
         match = re.match(r"^(\d+)\s*(.*)", content)
         if not match:
-            yield event.plain_result("格式错误。请使用：fix 序号 新内容\n例如：fix 3 改成光电数据集会议")
-            return
+            return event.plain_result("格式错误。请使用：fix 序号 新内容\n例如：fix 3 改成光电数据集会议")
             
         idx = int(match.group(1)) - 1
         raw_new_content = match.group(2).strip()
         
         if not (0 <= idx < len(todos)):
-            yield event.plain_result(f"找不到第 {idx+1} 条待办。")
-            return
+            return event.plain_result(f"找不到第 {idx+1} 条待办。")
             
         if not raw_new_content:
-            yield event.plain_result("请输入新的待办内容。")
-            return
+            return event.plain_result("请输入新的待办内容。")
 
         # Simple cleanup: remove common prefixes like "改成", "变为"
-        # Regex to remove optional "改成" or "变为" or ":" at start
         cleaned_content = re.sub(r"^(改成|变为|变成|是|为|:)\s*", "", raw_new_content).strip()
         
         updated_item = self.storage.update_todo_content(platform, user_id, today, idx, cleaned_content)
@@ -307,6 +295,6 @@ class TodoPalPlugin(Star):
             # Show the updated list
             fresh_todos = self.storage.load_todos(platform, user_id, today)
             preview = self._format_preview(fresh_todos, include_confirm_prompt=False)
-            yield event.plain_result(f"已修改第 {idx+1} 条：\n\n{preview}")
+            return event.plain_result(f"已修改第 {idx+1} 条：\n\n{preview}")
         else:
-            yield event.plain_result("修改失败，请重试。")
+            return event.plain_result("修改失败，请重试。")
