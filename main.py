@@ -161,6 +161,40 @@ class TodoPalPlugin(Star):
             return True
         return False
 
+    async def _reply_with_persona(self, event, plain_text: str):
+        """Helper to reply with persona if configured, otherwise plain text."""
+        persona = self.config.get("bot_persona", "")
+        if not persona:
+            yield event.plain_result(plain_text)
+            return
+
+        # Use LLM to rephrase
+        prompt = f"""
+你是一个助手。请根据以下人格设定，将括号里的系统提示转化为符合人设的自然回复。
+人格设定：{persona} (请尝试扮演这个角色)
+系统提示：({plain_text})
+
+请直接输出回复内容，不要加引号。
+"""
+        try:
+            # We need provider_id. Try to get it from event.
+            try:
+                umo = event.unified_msg_origin
+                provider_id = await self.context.get_current_chat_provider_id(umo=umo)
+            except:
+                provider_id = await self.context.get_current_chat_provider_id(event.unified_msg_origin)
+            
+            if provider_id:
+                resp = await self.context.llm_generate(provider_id, prompt)
+                if resp and hasattr(resp, 'completion_text'):
+                    yield event.plain_result(resp.completion_text)
+                    return
+        except Exception as e:
+            logger.error(f"Persona reply failed: {e}")
+        
+        # Fallback
+        yield event.plain_result(plain_text)
+
     def _format_preview(self, todos: list, include_confirm_prompt: bool = True) -> str:
         """
         Format todos for user confirmation or display.
@@ -244,17 +278,25 @@ class TodoPalPlugin(Star):
             return
 
         if not todo_content:
-            yield event.plain_result(f"请输入{command_prefix}的具体内容。")
+            yield await self._reply_with_persona(event, f"请输入{command_prefix}的具体内容。")
             return
 
         # --- Handle 'done' command ---
         if command_prefix == 'done':
-            yield await self._handle_done_command(event, platform, user_id, todo_content)
+            # done command handles its own persona reply internally if we refactor it, 
+            # OR we refactor _handle_done_command to return string and we reply here.
+            # Currently _handle_done_command yields plain_result directly.
+            # We should refactor the helper functions to return (success, message) or just message string.
+            # But that's a big refactor. 
+            # Alternative: modifying helper functions to use _reply_with_persona.
+            async for result in self._handle_done_command(event, platform, user_id, todo_content):
+                 yield result
             return
 
         # --- Handle 'fix' command ---
         if command_prefix == 'fix':
-            yield await self._handle_fix_command(event, platform, user_id, todo_content)
+            async for result in self._handle_fix_command(event, platform, user_id, todo_content):
+                yield result
             return
 
         # --- Handle 'todo' and 'add' commands (require LLM) ---
@@ -282,28 +324,31 @@ class TodoPalPlugin(Star):
             intent_result = await analyze_intent(self.context, provider_id, todo_content, current_todos)
             
             if not intent_result or not intent_result.get('type'):
-                yield event.plain_result("抱歉，我没太理解您的意思，请换个说法试试。")
+                yield await self._reply_with_persona(event, "抱歉，我没太理解您的意思，请换个说法试试。")
                 return
             
             intent_type = intent_result['type']
             payload = intent_result.get('payload')
             
             if intent_type == 'check':
-                yield await self._handle_check_command(event, platform, user_id)
+                async for result in self._handle_check_command(event, platform, user_id):
+                    yield result
                 return
                 
             elif intent_type == 'done':
                 if not payload:
-                     yield event.plain_result("需要指定完成哪一项哦。")
+                     yield await self._reply_with_persona(event, "需要指定完成哪一项哦。")
                      return
-                yield await self._handle_done_command(event, platform, user_id, str(payload))
+                async for result in self._handle_done_command(event, platform, user_id, str(payload)):
+                    yield result
                 return
                 
             elif intent_type == 'fix':
                 if not payload:
-                    yield event.plain_result("需要指定修改哪一项及新内容哦。")
+                    yield await self._reply_with_persona(event, "需要指定修改哪一项及新内容哦。")
                     return
-                yield await self._handle_fix_command(event, platform, user_id, str(payload))
+                async for result in self._handle_fix_command(event, platform, user_id, str(payload)):
+                    yield result
                 return
                 
             elif intent_type == 'add':
@@ -316,11 +361,11 @@ class TodoPalPlugin(Star):
                     todos = await parse_todo(self.context, provider_id, todo_content)
             
             elif intent_type == 'cancel':
-                yield event.plain_result("好的，什么都不做。")
+                yield await self._reply_with_persona(event, "好的，什么都不做。")
                 return
                 
             else:
-                yield event.plain_result("抱歉，我没太理解您的意思。")
+                yield await self._reply_with_persona(event, "抱歉，我没太理解您的意思。")
                 return
 
         else:
@@ -328,10 +373,10 @@ class TodoPalPlugin(Star):
             todos = await parse_todo(self.context, provider_id, todo_content)
 
         if todos is None:
-            yield event.plain_result("暂时没有稳定识别这条待办，请换一种更明确的表达方式。")
+            yield await self._reply_with_persona(event, "暂时没有稳定识别这条待办，请换一种更明确的表达方式。")
             return
         if not todos:
-            yield event.plain_result("未能识别到任何待办事项。")
+            yield await self._reply_with_persona(event, "未能识别到任何待办事项。")
             return
 
         # For 'todo' (smart mode), we default to append unless we want to support overwrite logic explicitly.
@@ -368,9 +413,9 @@ class TodoPalPlugin(Star):
             if existing:
                 warning = f"\n⚠️ **注意：这将覆盖您今天已有的 {len(existing)} 条待办！**"
             
-            yield event.plain_result(f"【新建/覆盖模式】{warning}\n{preview}")
+            yield await self._reply_with_persona(event, f"【新建/覆盖模式】{warning}\n{preview}")
         else:
-            yield event.plain_result(f"【追加模式】\n{preview}")
+            yield await self._reply_with_persona(event, f"【追加模式】\n{preview}")
 
     @filter.regex(r"^(确认|取消)$")
     async def handle_confirmation(self, event: AstrMessageEvent):
@@ -391,7 +436,7 @@ class TodoPalPlugin(Star):
 
         if action == "取消":
             del self.sessions[event.unified_msg_origin]
-            yield event.plain_result("已取消。")
+            yield await self._reply_with_persona(event, "已取消。")
             return
 
         if state == 'WAITING_CONFIRM':
@@ -399,7 +444,7 @@ class TodoPalPlugin(Star):
                 mode = session.get('action_type', 'append')
                 self._save_todos(platform, user_id, todos, source_text, mode=mode)
                 del self.sessions[event.unified_msg_origin]
-                yield event.plain_result("已保存待办事项。")
+                yield await self._reply_with_persona(event, "已保存待办事项。")
             else:
                 yield event.plain_result("请回复“确认”或“取消”。")
 
@@ -436,12 +481,14 @@ class TodoPalPlugin(Star):
         
         todos = self.storage.load_todos(platform, user_id, today)
         if not todos:
-            return event.plain_result(f"今天没有待办事项哦。")
+            yield await self._reply_with_persona(event, f"今天没有待办事项哦。")
+            return
 
         matched_indices = TodoMatcher.match_todos(todos, content)
         
         if not matched_indices:
-            return event.plain_result("找不到对应的待办事项，请检查描述或序号是否准确。")
+            yield await self._reply_with_persona(event, "找不到对应的待办事项，请检查描述或序号是否准确。")
+            return
 
         updated_items = []
         for idx in matched_indices:
@@ -450,13 +497,14 @@ class TodoPalPlugin(Star):
                 updated_items.append(todos[idx]['content'])
         
         if not updated_items:
-            return event.plain_result("所选的待办事项已经是完成状态啦。")
+            yield await self._reply_with_persona(event, "所选的待办事项已经是完成状态啦。")
+            return
 
         # Reload to get the fresh state and format it
         fresh_todos = self.storage.load_todos(platform, user_id, today)
         preview = self._format_preview(fresh_todos, include_confirm_prompt=False)
         
-        return event.plain_result(f"太棒了！已更新状态：\n\n{preview}")
+        yield await self._reply_with_persona(event, f"太棒了！已更新状态：\n\n{preview}")
 
     async def _handle_check_command(self, event: AstrMessageEvent, platform: str, user_id: str):
         """
@@ -466,10 +514,11 @@ class TodoPalPlugin(Star):
         todos = self.storage.load_todos(platform, user_id, today)
         
         if not todos:
-            return event.plain_result("今天还没有待办事项哦。")
+            yield await self._reply_with_persona(event, "今天还没有待办事项哦。")
+            return
             
         preview = self._format_preview(todos, include_confirm_prompt=False)
-        return event.plain_result(f"今日待办清单：\n\n{preview}")
+        yield await self._reply_with_persona(event, f"今日待办清单：\n\n{preview}")
 
     async def _handle_fix_command(self, event: AstrMessageEvent, platform: str, user_id: str, content: str):
         """
@@ -480,21 +529,25 @@ class TodoPalPlugin(Star):
         todos = self.storage.load_todos(platform, user_id, today)
         
         if not todos:
-            return event.plain_result("今天没有待办事项，无法修改。")
+            yield await self._reply_with_persona(event, "今天没有待办事项，无法修改。")
+            return
 
         # Parse index and content
         match = re.match(r"^(\d+)\s*(.*)", content)
         if not match:
-            return event.plain_result("格式错误。请使用：fix 序号 新内容\n例如：fix 3 改成光电数据集会议")
+            yield await self._reply_with_persona(event, "格式错误。请使用：fix 序号 新内容\n例如：fix 3 改成光电数据集会议")
+            return
             
         idx = int(match.group(1)) - 1
         raw_new_content = match.group(2).strip()
         
         if not (0 <= idx < len(todos)):
-            return event.plain_result(f"找不到第 {idx+1} 条待办。")
+            yield await self._reply_with_persona(event, f"找不到第 {idx+1} 条待办。")
+            return
             
         if not raw_new_content:
-            return event.plain_result("请输入新的待办内容。")
+            yield await self._reply_with_persona(event, "请输入新的待办内容。")
+            return
 
         # Simple cleanup: remove common prefixes like "改成", "变为"
         cleaned_content = re.sub(r"^(改成|变为|变成|是|为|:)\s*", "", raw_new_content).strip()
@@ -505,6 +558,6 @@ class TodoPalPlugin(Star):
             # Show the updated list
             fresh_todos = self.storage.load_todos(platform, user_id, today)
             preview = self._format_preview(fresh_todos, include_confirm_prompt=False)
-            return event.plain_result(f"已修改第 {idx+1} 条：\n\n{preview}")
+            yield await self._reply_with_persona(event, f"已修改第 {idx+1} 条：\n\n{preview}")
         else:
-            return event.plain_result("修改失败，请重试。")
+            yield await self._reply_with_persona(event, "修改失败，请重试。")
