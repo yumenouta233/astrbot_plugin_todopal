@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from datetime import datetime
 from astrbot.api.star import Context
 
@@ -40,9 +41,11 @@ JSON 输出：
 
     try:
         response = await context.llm_generate(
-            provider_id=provider_id,
+            chat_provider_id=provider_id,
             prompt=prompt
         )
+        if hasattr(response, "completion_text"):
+             response = response.completion_text
     except Exception as e:
         logger.error(f"LLM call failed: {e}")
         return None
@@ -51,16 +54,23 @@ JSON 输出：
         logger.warning("LLM returned empty response")
         return None
 
-    # Clean up the response to ensure valid JSON
-    cleaned_response = response.strip()
-    if cleaned_response.startswith("```"):
-        # Remove markdown code block markers
-        lines = cleaned_response.splitlines()
-        if lines[0].strip().startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip().startswith("```"):
-            lines = lines[:-1]
-        cleaned_response = "\n".join(lines).strip()
+    # Clean up the response to ensure valid JSON using regex
+    # This is more robust than simple string manipulation as it handles
+    # text before/after the JSON block (e.g., "Here is the JSON: ...")
+    match = re.search(r"\[.*\]", response, re.DOTALL)
+    if match:
+        cleaned_response = match.group(0)
+    else:
+        # Fallback to original response if regex fails
+        cleaned_response = response.strip()
+        # Still attempt to remove markdown if regex failed but it looks like code block
+        if cleaned_response.startswith("```"):
+            lines = cleaned_response.splitlines()
+            if lines[0].strip().startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            cleaned_response = "\n".join(lines).strip()
 
     try:
         todos = json.loads(cleaned_response)

@@ -47,7 +47,12 @@ class TodoPalPlugin(Star):
 
         # Get the current LLM provider ID
         try:
-            provider_id = self.context.get_current_chat_provider_id(event.unified_msg_origin)
+            # v4.5.7+ API change: use 'umo' parameter instead of positional argument
+            umo = event.unified_msg_origin
+            provider_id = await self.context.get_current_chat_provider_id(umo=umo)
+        except TypeError:
+            # Fallback for older versions
+            provider_id = await self.context.get_current_chat_provider_id(event.unified_msg_origin)
         except Exception as e:
             logger.error(f"Failed to get provider ID: {e}")
             yield event.plain_result("无法获取当前的 LLM Provider ID，请检查配置。")
