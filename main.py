@@ -71,32 +71,42 @@ class TodoPalPlugin(Star):
             result_lines.append("如果正确，请回复“确认”。")
         return "\n".join(result_lines)
 
-    @filter.regex(r"^(todo|add|done)\s+(.*)")
+    @filter.regex(r"^(todo|add|done|fix|check)\s*(.*)")
     async def todo_parse(self, event: AstrMessageEvent):
         """
-        Parse todo items from user input starting with 'todo', 'add', or 'done'.
+        Parse todo items from user input starting with 'todo', 'add', 'done', 'fix', or 'check'.
         """
         message_str = event.message_str
-        match = re.match(r"^(todo|add|done)\s+(.*)", message_str, re.IGNORECASE)
+        match = re.match(r"^(todo|add|done|fix|check)\s*(.*)", message_str, re.IGNORECASE)
         if not match:
              return
 
         command_prefix = match.group(1).lower()
         todo_content = match.group(2).strip()
         
-        if not todo_content:
-            yield event.plain_result(f"请输入{command_prefix}的具体内容。")
-            return
-
         user_id = event.get_sender_id()
         try:
             platform = event.unified_msg_origin.split(":")[0]
         except (AttributeError, IndexError):
             platform = "unknown"
 
+        # --- Handle 'check' command ---
+        if command_prefix == 'check':
+            await self._handle_check_command(event, platform, user_id)
+            return
+
+        if not todo_content:
+            yield event.plain_result(f"请输入{command_prefix}的具体内容。")
+            return
+
         # --- Handle 'done' command ---
         if command_prefix == 'done':
             await self._handle_done_command(event, platform, user_id, todo_content)
+            return
+
+        # --- Handle 'fix' command ---
+        if command_prefix == 'fix':
+            await self._handle_fix_command(event, platform, user_id, todo_content)
             return
 
         # --- Handle 'todo' and 'add' commands (require LLM) ---
@@ -141,7 +151,14 @@ class TodoPalPlugin(Star):
         preview = self._format_preview(todos, include_confirm_prompt=True)
         
         if command_prefix == 'todo':
-            yield event.plain_result(f"【新建/覆盖模式】\n{preview}")
+            # Check if data exists for today to warn user
+            today = datetime.now().strftime("%Y-%m-%d")
+            existing = self.storage.load_todos(platform, user_id, today)
+            warning = ""
+            if existing:
+                warning = f"\n⚠️ **注意：这将覆盖您今天已有的 {len(existing)} 条待办！**"
+            
+            yield event.plain_result(f"【新建/覆盖模式】{warning}\n{preview}")
         else:
             yield event.plain_result(f"【追加模式】\n{preview}")
 
@@ -235,3 +252,61 @@ class TodoPalPlugin(Star):
         preview = self._format_preview(fresh_todos, include_confirm_prompt=False)
         
         yield event.plain_result(f"太棒了！已更新状态：\n\n{preview}")
+
+    async def _handle_check_command(self, event: AstrMessageEvent, platform: str, user_id: str):
+        """
+        Handle 'check' command to view today's todos.
+        """
+        today = datetime.now().strftime("%Y-%m-%d")
+        todos = self.storage.load_todos(platform, user_id, today)
+        
+        if not todos:
+            yield event.plain_result("今天还没有待办事项哦。")
+            return
+            
+        preview = self._format_preview(todos, include_confirm_prompt=False)
+        yield event.plain_result(f"今日待办清单：\n\n{preview}")
+
+    async def _handle_fix_command(self, event: AstrMessageEvent, platform: str, user_id: str, content: str):
+        """
+        Handle 'fix' command to modify a specific todo item content.
+        Format: fix 3 改成光电数据集会议
+        """
+        today = datetime.now().strftime("%Y-%m-%d")
+        todos = self.storage.load_todos(platform, user_id, today)
+        
+        if not todos:
+            yield event.plain_result("今天没有待办事项，无法修改。")
+            return
+
+        # Parse index and content
+        # Try to find the number at the beginning
+        match = re.match(r"^(\d+)\s*(.*)", content)
+        if not match:
+            yield event.plain_result("格式错误。请使用：fix 序号 新内容\n例如：fix 3 改成光电数据集会议")
+            return
+            
+        idx = int(match.group(1)) - 1
+        raw_new_content = match.group(2).strip()
+        
+        if not (0 <= idx < len(todos)):
+            yield event.plain_result(f"找不到第 {idx+1} 条待办。")
+            return
+            
+        if not raw_new_content:
+            yield event.plain_result("请输入新的待办内容。")
+            return
+
+        # Simple cleanup: remove common prefixes like "改成", "变为"
+        # Regex to remove optional "改成" or "变为" or ":" at start
+        cleaned_content = re.sub(r"^(改成|变为|变成|是|为|:)\s*", "", raw_new_content).strip()
+        
+        updated_item = self.storage.update_todo_content(platform, user_id, today, idx, cleaned_content)
+        
+        if updated_item:
+            # Show the updated list
+            fresh_todos = self.storage.load_todos(platform, user_id, today)
+            preview = self._format_preview(fresh_todos, include_confirm_prompt=False)
+            yield event.plain_result(f"已修改第 {idx+1} 条：\n\n{preview}")
+        else:
+            yield event.plain_result("修改失败，请重试。")

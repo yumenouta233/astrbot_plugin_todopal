@@ -153,3 +153,30 @@ class TodoStorage:
             self.save_todos(platform, user_id, date_str, todos)
             return todos[todo_index]
         return None
+
+    def update_todo_content(self, platform: str, user_id: str, date_str: str, todo_index: int, new_content: str) -> Optional[Dict]:
+        """
+        Update the content of a specific todo item by index (0-based).
+
+        Args:
+            platform: Platform identifier.
+            user_id: User identifier.
+            date_str: Date string.
+            todo_index: Index of the todo item in the list.
+            new_content: New content string.
+
+        Returns:
+            The updated todo item if successful, None otherwise.
+        """
+        todos = self.load_todos(platform, user_id, date_str)
+        if 0 <= todo_index < len(todos):
+            todos[todo_index]['content'] = new_content
+            todos[todo_index]['updated_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # Preserve source_text or update it? Maybe append modification note?
+            # For simplicity, we keep source_text as original or update it to reflect modification.
+            # Let's keep original source_text but maybe add a note if we had a field for it.
+            # Here we just update content.
+            
+            self.save_todos(platform, user_id, date_str, todos)
+            return todos[todo_index]
+        return None
