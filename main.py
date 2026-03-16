@@ -5,12 +5,16 @@ from datetime import datetime
 import re
 import uuid
 
+import json
+import os
+from pathlib import Path
+
 try:
-    from .llm_parser import parse_todo
+    from .llm_parser import parse_todo, analyze_intent
     from .storage import TodoStorage
     from .matcher import TodoMatcher
 except ImportError:
-    from llm_parser import parse_todo
+    from llm_parser import parse_todo, analyze_intent
     from storage import TodoStorage
     from matcher import TodoMatcher
 
@@ -31,6 +35,22 @@ class TodoPalPlugin(Star):
         self.storage = TodoStorage()
         # In-memory session state: {unified_msg_origin: {'state': str, 'todos': list, 'pending_date': str}}
         self.sessions = {}
+        self.triggers = self._load_triggers()
+
+    def _load_triggers(self):
+        """Load trigger keywords from triggers.json"""
+        try:
+            # Assuming triggers.json is in the same directory as this file
+            trigger_path = Path(__file__).parent / "triggers.json"
+            if trigger_path.exists():
+                with open(trigger_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data.get("keywords", [])
+        except Exception as e:
+            logger.error(f"Failed to load triggers.json: {e}")
+        
+        # Default fallback
+        return ["记", "待办", "任务", "做完", "完成", "修改", "改一下", "看看", "清单", "列表", "check", "add", "fix", "done"]
 
     def _format_preview(self, todos: list, include_confirm_prompt: bool = True) -> str:
         """
@@ -71,19 +91,35 @@ class TodoPalPlugin(Star):
             result_lines.append("如果正确，请回复“确认”。")
         return "\n".join(result_lines)
 
-    @filter.regex(r"^(todo|add|done|fix|check)\s*(.*)")
+    @filter.regex(r".*")
     async def todo_parse(self, event: AstrMessageEvent):
         """
-        Parse todo items from user input starting with 'todo', 'add', 'done', 'fix', or 'check'.
+        Parse todo items from user input.
+        Supports:
+        1. Explicit commands: 'todo', 'add', 'done', 'fix', 'check'
+        2. Natural language with keywords (defined in triggers.json)
         """
-        message_str = event.message_str
-        match = re.match(r"^(todo|add|done|fix|check)\s*(.*)", message_str, re.IGNORECASE)
-        if not match:
-             return
+        message_str = event.message_str.strip()
+        if not message_str:
+            return
 
-        command_prefix = match.group(1).lower()
-        todo_content = match.group(2).strip()
+        # 1. Check for explicit command prefixes
+        explicit_match = re.match(r"^(todo|add|done|fix|check)\s*(.*)", message_str, re.IGNORECASE)
         
+        if explicit_match:
+            command_prefix = explicit_match.group(1).lower()
+            todo_content = explicit_match.group(2).strip()
+            # If explicit command, force smart mode for 'todo' or execute others directly
+        else:
+            # 2. Check for keywords in triggers
+            # If no keyword matches, ignore this message
+            if not any(keyword in message_str for keyword in self.triggers):
+                return
+            
+            # If matched, treat as 'todo' command (smart agent)
+            command_prefix = 'todo'
+            todo_content = message_str
+
         user_id = event.get_sender_id()
         try:
             platform = event.unified_msg_origin.split(":")[0]
@@ -125,8 +161,59 @@ class TodoPalPlugin(Star):
             yield event.plain_result("未配置 LLM Provider。")
             return
 
-        # Parse Logic
-        todos = await parse_todo(self.context, provider_id, todo_content)
+        # Smart handling for 'todo' command
+        if command_prefix == 'todo':
+            today = datetime.now().strftime("%Y-%m-%d")
+            current_todos = self.storage.load_todos(platform, user_id, today)
+            
+            # Analyze intent
+            intent_result = await analyze_intent(self.context, provider_id, todo_content, current_todos)
+            
+            if not intent_result or not intent_result.get('type'):
+                yield event.plain_result("抱歉，我没太理解您的意思，请换个说法试试。")
+                return
+            
+            intent_type = intent_result['type']
+            payload = intent_result.get('payload')
+            
+            if intent_type == 'check':
+                yield await self._handle_check_command(event, platform, user_id)
+                return
+                
+            elif intent_type == 'done':
+                if not payload:
+                     yield event.plain_result("需要指定完成哪一项哦。")
+                     return
+                yield await self._handle_done_command(event, platform, user_id, str(payload))
+                return
+                
+            elif intent_type == 'fix':
+                if not payload:
+                    yield event.plain_result("需要指定修改哪一项及新内容哦。")
+                    return
+                yield await self._handle_fix_command(event, platform, user_id, str(payload))
+                return
+                
+            elif intent_type == 'add':
+                # Proceed to existing logic for adding todos
+                # Payload should be the list of todos
+                if isinstance(payload, list):
+                    todos = payload
+                else:
+                    # Fallback to old parser if payload is weird
+                    todos = await parse_todo(self.context, provider_id, todo_content)
+            
+            elif intent_type == 'cancel':
+                yield event.plain_result("好的，什么都不做。")
+                return
+                
+            else:
+                yield event.plain_result("抱歉，我没太理解您的意思。")
+                return
+
+        else:
+            # 'add' command: always append
+            todos = await parse_todo(self.context, provider_id, todo_content)
 
         if todos is None:
             yield event.plain_result("暂时没有稳定识别这条待办，请换一种更明确的表达方式。")
@@ -135,8 +222,19 @@ class TodoPalPlugin(Star):
             yield event.plain_result("未能识别到任何待办事项。")
             return
 
-        # 'todo' prefix means overwrite (new list), 'add' means append
-        action_type = 'overwrite' if command_prefix == 'todo' else 'append'
+        # For 'todo' (smart mode), we default to append unless we want to support overwrite logic explicitly.
+        # Given the "Smart Agent" change, 'todo' implies natural language interaction which usually means "add to list".
+        # However, to preserve "Overwrite" capability, we might need a specific trigger.
+        # For now, let's make 'todo' (via intent 'add') default to 'append' to be safe, 
+        # BUT if we want to support the old "Overwrite" behavior, we might need to ask.
+        # Let's stick to 'append' for smart 'add' to avoid data loss.
+        # If user really wants to overwrite, they might need to clear first (not supported yet) or we add a "clear" intent later.
+        # Wait, the previous logic was: 'todo' = overwrite, 'add' = append.
+        # Now 'todo' = smart agent. 'add' = append.
+        # So we effectively removed "Overwrite" command unless we re-introduce it.
+        # Let's change action_type to 'append' for both, unless we add logic.
+        
+        action_type = 'append' 
         
         # Store session state
         self.sessions[event.unified_msg_origin] = {
@@ -150,7 +248,7 @@ class TodoPalPlugin(Star):
 
         preview = self._format_preview(todos, include_confirm_prompt=True)
         
-        if command_prefix == 'todo':
+        if command_prefix == 'todo_old_overwrite_mode_disabled':
             # Check if data exists for today to warn user
             today = datetime.now().strftime("%Y-%m-%d")
             existing = self.storage.load_todos(platform, user_id, today)
