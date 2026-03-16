@@ -1,14 +1,45 @@
-# astrbot-plugin-helloworld
+# AstrBot Plugin: TodoPal
 
-AstrBot 插件模板 / A template plugin for AstrBot plugin feature
+AI 驱动的智能待办事项管理插件。只需通过自然语言描述，即可自动解析时间、日期和任务内容。
 
-> [!NOTE]
-> This repo is just a template of [AstrBot](https://github.com/AstrBotDevs/AstrBot) Plugin.
+## 功能特性
+
+- **自然语言解析**：直接用平时说话的方式描述待办事项，无需复杂格式。
+- **智能时间识别**：自动理解“明天下午”、“下周三”、“晚上8点”等时间表达。
+- **多任务处理**：一条消息中可以包含多个待办事项。
+
+## 使用方法
+
+### 添加待办事项
+
+直接发送以 `todo` 开头的消息（无需斜杠）。
+
+**示例 1：指定具体时间**
+> 用户：`todo 明天下午3点给谭老师发邮件`
 > 
-> [AstrBot](https://github.com/AstrBotDevs/AstrBot) is an agentic assistant for both personal and group conversations. It can be deployed across dozens of mainstream instant messaging platforms, including QQ, Telegram, Feishu, DingTalk, Slack, LINE, Discord, Matrix, etc. In addition, it provides a reliable and extensible conversational AI infrastructure for individuals, developers, and teams. Whether you need a personal AI companion, an intelligent customer support agent, an automation assistant, or an enterprise knowledge base, AstrBot enables you to quickly build AI applications directly within your existing messaging workflows.
+> Bot：
+> 我识别到以下待办：
+> 1. 2026-03-17 15:00 给谭老师发邮件
 
-# Supports
+**示例 2：多个任务**
+> 用户：`todo 上午10点开组会，晚上8点去健身`
+> 
+> Bot：
+> 我识别到以下待办：
+> 1. 2026-03-16 10:00 开组会
+> 2. 2026-03-16 20:00 去健身
 
-- [AstrBot Repo](https://github.com/AstrBotDevs/AstrBot)
-- [AstrBot Plugin Development Docs (Chinese)](https://docs.astrbot.app/dev/star/plugin-new.html)
-- [AstrBot Plugin Development Docs (English)](https://docs.astrbot.app/en/dev/star/plugin-new.html)
+**示例 3：仅日期无时间**
+> 用户：`todo 下周一提交报告`
+> 
+> Bot：
+> 我识别到以下待办：
+> 1. 2026-03-23 全天 提交报告
+
+## 安装
+
+本插件专为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 设计。请将其放置在 AstrBot 的插件目录中。
+
+## 配置
+
+本插件依赖 AstrBot 的 LLM 配置。请确保您的 AstrBot 已正确配置了 LLM Provider。

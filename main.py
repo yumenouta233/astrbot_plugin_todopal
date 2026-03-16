@@ -23,16 +23,25 @@ class TodoPalPlugin(Star):
         """
         super().__init__(context)
 
-    @filter.command("todo_parse")
+    @filter.regex(r"^todo\s+(.*)")
     async def todo_parse(self, event: AstrMessageEvent):
         """
-        Parse todo items from user input command /todo_parse.
+        Parse todo items from user input starting with 'todo'.
 
         Args:
             event: The message event triggered by the command.
         """
         message_str = event.message_str
-        if not message_str:
+        # Extract the content after 'todo'
+        import re
+        match = re.match(r"^todo\s+(.*)", message_str, re.IGNORECASE)
+        if not match:
+             # This should ideally not happen if regex matches, but for safety
+             return
+
+        todo_content = match.group(1).strip()
+
+        if not todo_content:
             yield event.plain_result("请输入待办事项内容。")
             return
 
@@ -49,7 +58,7 @@ class TodoPalPlugin(Star):
             return
 
         # Call the parser logic
-        todos = await parse_todo(self.context, provider_id, message_str)
+        todos = await parse_todo(self.context, provider_id, todo_content)
 
         if todos is None:
             # As per requirement: "如果解析失败，返回： 暂时没有稳定识别这条待办，请换一种更明确的表达方式。"
