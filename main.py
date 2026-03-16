@@ -165,8 +165,7 @@ class TodoPalPlugin(Star):
         """Helper to reply with persona if configured, otherwise plain text."""
         persona = self.config.get("bot_persona", "")
         if not persona:
-            yield event.plain_result(plain_text)
-            return
+            return event.plain_result(plain_text)
 
         # Use LLM to rephrase
         prompt = f"""
@@ -187,13 +186,12 @@ class TodoPalPlugin(Star):
             if provider_id:
                 resp = await self.context.llm_generate(provider_id, prompt)
                 if resp and hasattr(resp, 'completion_text'):
-                    yield event.plain_result(resp.completion_text)
-                    return
+                    return event.plain_result(resp.completion_text)
         except Exception as e:
             logger.error(f"Persona reply failed: {e}")
         
         # Fallback
-        yield event.plain_result(plain_text)
+        return event.plain_result(plain_text)
 
     def _format_preview(self, todos: list, include_confirm_prompt: bool = True) -> str:
         """
