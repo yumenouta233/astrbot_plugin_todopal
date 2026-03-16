@@ -1,0 +1,48 @@
+{
+  "custom_triggers": {
+    "type": "list",
+    "description": "自然语言触发关键词",
+    "default": ["记", "待办", "任务", "做完", "完成", "修改", "改一下", "看看", "清单", "列表", "check", "add", "fix", "done"]
+  },
+  "auto_rollover": {
+    "type": "bool",
+    "description": "开启未完成事项0点自动顺延",
+    "default": true
+  },
+  "bot_persona": {
+    "type": "string",
+    "description": "选择助手的人格语气(用于主动提醒和总结)",
+    "_special": "select_persona",
+    "default": ""
+  },
+  "reminder_enable": {
+    "type": "bool",
+    "description": "开启高频循环提醒",
+    "default": false
+  },
+  "reminder_interval": {
+    "type": "int",
+    "description": "每隔多少小时提醒一次 (仅当有未完成待办时)",
+    "default": 2
+  },
+  "reminder_start": {
+    "type": "string",
+    "description": "提醒开始时间 (HH:MM，如 09:00)",
+    "default": "09:00"
+  },
+  "reminder_end": {
+    "type": "string",
+    "description": "提醒结束时间 (HH:MM，如 22:00)",
+    "default": "22:00"
+  },
+  "summary_enable": {
+    "type": "bool",
+    "description": "开启晚间待办总结报告",
+    "default": true
+  },
+  "summary_time": {
+    "type": "string",
+    "description": "晚间总结发送时间 (HH:MM，如 23:00)",
+    "default": "23:00"
+  }
+}

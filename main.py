@@ -8,6 +8,9 @@ import uuid
 import json
 import os
 from pathlib import Path
+import asyncio
+from datetime import datetime, timedelta
+from astrbot.api.message_components import Plain
 
 try:
     from .llm_parser import parse_todo, analyze_intent
@@ -18,13 +21,13 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.0.0")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.5.0")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
     """
 
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config: dict = None):
         """
         Initialize the TodoPal plugin.
 
@@ -35,22 +38,128 @@ class TodoPalPlugin(Star):
         self.storage = TodoStorage()
         # In-memory session state: {unified_msg_origin: {'state': str, 'todos': list, 'pending_date': str}}
         self.sessions = {}
-        self.triggers = self._load_triggers()
-
-    def _load_triggers(self):
-        """Load trigger keywords from triggers.json"""
-        try:
-            # Assuming triggers.json is in the same directory as this file
-            trigger_path = Path(__file__).parent / "triggers.json"
-            if trigger_path.exists():
-                with open(trigger_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    return data.get("keywords", [])
-        except Exception as e:
-            logger.error(f"Failed to load triggers.json: {e}")
         
-        # Default fallback
-        return ["记", "待办", "任务", "做完", "完成", "修改", "改一下", "看看", "清单", "列表", "check", "add", "fix", "done"]
+        self.config = config or {}
+        
+        # We don't need triggers.json anymore if we have self.config
+        # But we provide a fallback default
+        self.triggers = self.config.get("custom_triggers", ["记", "待办", "任务", "做完", "完成", "修改", "改一下", "看看", "清单", "列表", "check", "add", "fix", "done"])
+        
+        # Start cron loop for proactive messaging
+        self._cron_task = asyncio.create_task(self._cron_loop())
+        self._last_rollover_date = ""
+
+    async def _cron_loop(self):
+        """Background task to handle reminders and summaries."""
+        logger.info("TodoPal cron loop started.")
+        # Store last reminder time per user
+        last_reminders = {}
+        
+        while True:
+            try:
+                now = datetime.now()
+                current_time_str = now.strftime("%H:%M")
+                today_str = now.strftime("%Y-%m-%d")
+                
+                # 1. Daily Rollover check
+                if self.config.get("auto_rollover", True):
+                    if today_str != self._last_rollover_date:
+                        self._do_rollover(today_str)
+                        self._last_rollover_date = today_str
+
+                # 2. Check users for reminders / summaries
+                users = self.storage.get_all_users()
+                for u in users:
+                    platform = u['platform']
+                    user_id = u['user_id']
+                    origin = u['origin']
+                    
+                    # Summary Logic
+                    if self.config.get("summary_enable", True) and current_time_str == self.config.get("summary_time", "23:00"):
+                        await self._send_proactive_summary(platform, user_id, origin, today_str)
+                    
+                    # Reminder Logic
+                    if self.config.get("reminder_enable", False):
+                        start_time = self.config.get("reminder_start", "09:00")
+                        end_time = self.config.get("reminder_end", "22:00")
+                        if start_time <= current_time_str <= end_time:
+                            last_time = last_reminders.get(user_id)
+                            interval_hours = self.config.get("reminder_interval", 2)
+                            if not last_time or (now - last_time).total_seconds() >= interval_hours * 3600:
+                                sent = await self._send_proactive_reminder(platform, user_id, origin, today_str)
+                                if sent:
+                                    last_reminders[user_id] = now
+                                    
+            except Exception as e:
+                logger.error(f"TodoPal cron loop error: {e}")
+            
+            # Sleep for 1 minute before checking again
+            await asyncio.sleep(60)
+
+    def _do_rollover(self, today_str: str):
+        yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        users = self.storage.get_all_users()
+        for u in users:
+            rolled = self.storage.rollover_pending_todos(u['platform'], u['user_id'], yesterday_str, today_str)
+            if rolled > 0:
+                logger.info(f"Rolled over {rolled} items for {u['user_id']}")
+
+    async def _send_proactive_summary(self, platform, user_id, origin, today_str):
+        todos = self.storage.load_todos(platform, user_id, today_str)
+        if not todos:
+            return
+            
+        completed = [t for t in todos if t.get('status') == 'done']
+        pending = [t for t in todos if t.get('status') != 'done']
+        
+        persona = self.config.get("bot_persona", "")
+        persona_prompt = f"请使用以下人格设定回复：{persona}\n" if persona else ""
+        
+        prompt = f"""
+{persona_prompt}
+用户今天的待办事项总结：
+- 共计 {len(todos)} 项
+- 已完成 {len(completed)} 项
+- 未完成 {len(pending)} 项
+详情：
+{[t.get('content') for t in todos]}
+
+请生成一段总结性的话语，主动发给用户，语气要自然。不要返回JSON，直接返回要说的话。
+"""
+        provider_id = await self.context.get_current_chat_provider_id(umo=origin)
+        if not provider_id: return
+        
+        resp = await self.context.llm_generate(provider_id, prompt)
+        if resp and hasattr(resp, 'completion_text'):
+            msg = resp.completion_text
+            await self.context.send_message(origin, msg)
+
+    async def _send_proactive_reminder(self, platform, user_id, origin, today_str) -> bool:
+        todos = self.storage.load_todos(platform, user_id, today_str)
+        pending = [t for t in todos if t.get('status') != 'done']
+        
+        if not pending:
+            return False # Nothing to remind
+            
+        persona = self.config.get("bot_persona", "")
+        persona_prompt = f"请使用以下人格设定回复：{persona}\n" if persona else ""
+        
+        prompt = f"""
+{persona_prompt}
+用户还有 {len(pending)} 项待办未完成，分别是：
+{[t.get('content') for t in pending]}
+
+请生成一段简短的话语，主动提醒用户去完成任务，语气要自然。不要返回JSON，直接返回要说的话。
+"""
+        provider_id = await self.context.get_current_chat_provider_id(umo=origin)
+        if not provider_id: return False
+        
+        resp = await self.context.llm_generate(provider_id, prompt)
+        if resp and hasattr(resp, 'completion_text'):
+            msg = resp.completion_text
+            await self.context.send_message(origin, msg)
+            return True
+        return False
 
     def _format_preview(self, todos: list, include_confirm_prompt: bool = True) -> str:
         """
@@ -125,6 +234,9 @@ class TodoPalPlugin(Star):
             platform = event.unified_msg_origin.split(":")[0]
         except (AttributeError, IndexError):
             platform = "unknown"
+
+        # Register user for proactive messaging
+        self.storage.register_user(platform, user_id, event.unified_msg_origin)
 
         # --- Handle 'check' command ---
         if command_prefix == 'check':

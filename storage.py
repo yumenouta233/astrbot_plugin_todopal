@@ -23,6 +23,43 @@ class TodoStorage:
             base_path: Base directory for storage.
         """
         self.base_path = Path(base_path)
+        self.users_file = self.base_path / "users.json"
+        self._ensure_users_file()
+
+    def _ensure_users_file(self):
+        if not self.users_file.exists():
+            self.ensure_directory(self.users_file)
+            with open(self.users_file, 'w', encoding='utf-8') as f:
+                json.dump({}, f)
+
+    def register_user(self, platform: str, user_id: str, origin: str):
+        """Register or update a user's unified message origin for proactive messaging."""
+        try:
+            with open(self.users_file, 'r', encoding='utf-8') as f:
+                users = json.load(f)
+            
+            key = f"{platform}_{user_id}"
+            users[key] = {
+                "platform": platform,
+                "user_id": user_id,
+                "origin": origin,
+                "last_active": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            
+            with open(self.users_file, 'w', encoding='utf-8') as f:
+                json.dump(users, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to register user {user_id}: {e}")
+
+    def get_all_users(self) -> List[Dict]:
+        """Get all registered users."""
+        try:
+            with open(self.users_file, 'r', encoding='utf-8') as f:
+                users = json.load(f)
+            return list(users.values())
+        except Exception as e:
+            logger.error(f"Failed to read users: {e}")
+            return []
 
     def _get_file_path(self, platform: str, user_id: str, date_str: str) -> Path:
         """
@@ -85,6 +122,30 @@ class TodoStorage:
         except (json.JSONDecodeError, OSError) as e:
             logger.error(f"Failed to load todos from {file_path}: {e}")
             return []
+
+    def rollover_pending_todos(self, platform: str, user_id: str, from_date_str: str, to_date_str: str) -> int:
+        """
+        Move pending todos from one date to another. Returns number of rolled over items.
+        """
+        from_todos = self.load_todos(platform, user_id, from_date_str)
+        if not from_todos:
+            return 0
+            
+        pending_items = [t for t in from_todos if t.get('status') != 'done']
+        if not pending_items:
+            return 0
+            
+        # Append to target date
+        self.append_todos(platform, user_id, to_date_str, pending_items)
+        
+        # Mark as rolled over in old file (optional, but good for data consistency)
+        for t in from_todos:
+            if t.get('status') != 'done':
+                t['status'] = 'rolled_over'
+                t['updated_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.save_todos(platform, user_id, from_date_str, from_todos)
+        
+        return len(pending_items)
 
     def save_todos(self, platform: str, user_id: str, date_str: str, todos: List[Dict]):
         """
