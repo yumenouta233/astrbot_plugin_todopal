@@ -113,7 +113,13 @@ class TodoPalPlugin(Star):
         # We'll check if ANY of the dates have existing data.
         dates_with_data = []
         user_id = event.get_sender_id()
-        platform = event.platform_name # This might need normalization in storage
+        # Fix platform name extraction: platform_name might not exist on event directly
+        # Try unified_msg_origin first: "platform:..."
+        try:
+            platform = event.unified_msg_origin.split(":")[0]
+        except (AttributeError, IndexError):
+            # Fallback
+            platform = "unknown"
         
         for todo in todos:
             d = todo.get("date")
@@ -218,7 +224,10 @@ class TodoPalPlugin(Star):
         # "第2个做完了" implies a visible list. Usually users refer to today's list.
         today = datetime.now().strftime("%Y-%m-%d")
         user_id = event.get_sender_id()
-        platform = event.platform_name
+        try:
+            platform = event.unified_msg_origin.split(":")[0]
+        except (AttributeError, IndexError):
+            platform = "unknown"
 
         todos = self.storage.load_todos(platform, user_id, today)
         if not todos:
