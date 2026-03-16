@@ -1,24 +1,76 @@
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 
-@register("helloworld", "YourName", "一个简单的 Hello World 插件", "1.0.0")
-class MyPlugin(Star):
+try:
+    from .llm_parser import parse_todo
+except ImportError:
+    from llm_parser import parse_todo
+
+
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.0.0")
+class TodoPalPlugin(Star):
+    """
+    TodoPal plugin for AstrBot to manage todo items.
+    """
+
     def __init__(self, context: Context):
+        """
+        Initialize the TodoPal plugin.
+
+        Args:
+            context: The AstrBot context.
+        """
         super().__init__(context)
 
-    async def initialize(self):
-        """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
+    @filter.command("todo_parse")
+    async def todo_parse(self, event: AstrMessageEvent):
+        """
+        Parse todo items from user input command /todo_parse.
 
-    # 注册指令的装饰器。指令名为 helloworld。注册成功后，发送 `/helloworld` 就会触发这个指令，并回复 `你好, {user_name}!`
-    @filter.command("helloworld")
-    async def helloworld(self, event: AstrMessageEvent):
-        """这是一个 hello world 指令""" # 这是 handler 的描述，将会被解析方便用户了解插件内容。建议填写。
-        user_name = event.get_sender_name()
-        message_str = event.message_str # 用户发的纯文本消息字符串
-        message_chain = event.get_messages() # 用户所发的消息的消息链 # from astrbot.api.message_components import *
-        logger.info(message_chain)
-        yield event.plain_result(f"Hello, {user_name}, 你发了 {message_str}!") # 发送一条纯文本消息
+        Args:
+            event: The message event triggered by the command.
+        """
+        message_str = event.message_str
+        if not message_str:
+            yield event.plain_result("请输入待办事项内容。")
+            return
 
-    async def terminate(self):
-        """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
+        # Get the current LLM provider ID
+        try:
+            provider_id = self.context.get_current_chat_provider_id(event.unified_msg_origin)
+        except Exception as e:
+            logger.error(f"Failed to get provider ID: {e}")
+            yield event.plain_result("无法获取当前的 LLM Provider ID，请检查配置。")
+            return
+
+        if not provider_id:
+            yield event.plain_result("未配置 LLM Provider。")
+            return
+
+        # Call the parser logic
+        todos = await parse_todo(self.context, provider_id, message_str)
+
+        if todos is None:
+            # As per requirement: "如果解析失败，返回： 暂时没有稳定识别这条待办，请换一种更明确的表达方式。"
+            yield event.plain_result("暂时没有稳定识别这条待办，请换一种更明确的表达方式。")
+            return
+
+        if not todos:
+            yield event.plain_result("未能识别到任何待办事项。")
+            return
+
+        # Format output
+        result_lines = ["我识别到以下待办：", ""]
+        for i, todo in enumerate(todos, 1):
+            date = todo.get("date", "Unknown Date")
+            time = todo.get("time")
+            content = todo.get("content", "Unknown Content")
+
+            time_str = f" {time}" if time else " 全天"
+            result_lines.append(f"{i}. {date}{time_str} {content}")
+
+        result_lines.append("")
+        result_lines.append("如果正确，请回复“确认”。")
+
+        yield event.plain_result("\n".join(result_lines))
