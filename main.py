@@ -113,10 +113,17 @@ class TodoPalPlugin(Star):
         pending = [t for t in todos if t.get('status') != 'done']
         
         persona = self.config.get("bot_persona", "")
-        persona_prompt = f"请使用以下人格设定回复：{persona}\n" if persona else ""
+        custom_prompt = self.config.get("bot_persona_prompt", "")
+        
+        # Priority: custom_prompt > persona ID
+        persona_instruction = ""
+        if custom_prompt:
+            persona_instruction = f"请严格遵守以下人格设定：\n{custom_prompt}\n"
+        elif persona:
+            persona_instruction = f"请使用 ID 为 {persona} 的人格语气回复。\n"
         
         prompt = f"""
-{persona_prompt}
+{persona_instruction}
 用户今天的待办事项总结：
 - 共计 {len(todos)} 项
 - 已完成 {len(completed)} 项
@@ -126,6 +133,7 @@ class TodoPalPlugin(Star):
 
 请生成一段总结性的话语，主动发给用户，语气要自然。不要返回JSON，直接返回要说的话。
 """
+        logger.debug(f"Proactive summary prompt: {prompt}")
         provider_id = await self.context.get_current_chat_provider_id(umo=origin)
         if not provider_id: return
         
@@ -142,15 +150,23 @@ class TodoPalPlugin(Star):
             return False # Nothing to remind
             
         persona = self.config.get("bot_persona", "")
-        persona_prompt = f"请使用以下人格设定回复：{persona}\n" if persona else ""
+        custom_prompt = self.config.get("bot_persona_prompt", "")
+        
+        # Priority: custom_prompt > persona ID
+        persona_instruction = ""
+        if custom_prompt:
+            persona_instruction = f"请严格遵守以下人格设定：\n{custom_prompt}\n"
+        elif persona:
+            persona_instruction = f"请使用 ID 为 {persona} 的人格语气回复。\n"
         
         prompt = f"""
-{persona_prompt}
+{persona_instruction}
 用户还有 {len(pending)} 项待办未完成，分别是：
 {[t.get('content') for t in pending]}
 
 请生成一段简短的话语，主动提醒用户去完成任务，语气要自然。不要返回JSON，直接返回要说的话。
 """
+        logger.debug(f"Proactive reminder prompt: {prompt}")
         provider_id = await self.context.get_current_chat_provider_id(umo=origin)
         if not provider_id: return False
         
@@ -164,17 +180,27 @@ class TodoPalPlugin(Star):
     async def _reply_with_persona(self, event, plain_text: str):
         """Helper to reply with persona if configured, otherwise plain text."""
         persona = self.config.get("bot_persona", "")
-        if not persona:
+        custom_prompt = self.config.get("bot_persona_prompt", "")
+        
+        if not persona and not custom_prompt:
             return event.plain_result(plain_text)
+
+        # Priority: custom_prompt > persona ID
+        persona_instruction = ""
+        if custom_prompt:
+            persona_instruction = f"人格设定：\n{custom_prompt}\n"
+        else:
+            persona_instruction = f"人格设定ID：{persona} (请尝试扮演这个角色)\n"
 
         # Use LLM to rephrase
         prompt = f"""
 你是一个助手。请根据以下人格设定，将括号里的系统提示转化为符合人设的自然回复。
-人格设定：{persona} (请尝试扮演这个角色)
+{persona_instruction}
 系统提示：({plain_text})
 
 请直接输出回复内容，不要加引号。
 """
+        logger.debug(f"Reply persona prompt: {prompt}")
         try:
             # We need provider_id. Try to get it from event.
             try:

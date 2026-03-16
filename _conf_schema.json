@@ -15,6 +15,12 @@
     "_special": "select_persona",
     "default": ""
   },
+  "bot_persona_prompt": {
+    "type": "text",
+    "description": "自定义人格提示词 (优先级高于选择的人格)",
+    "hint": "直接填写 Prompt，例如：你是一个傲娇的猫娘...",
+    "default": ""
+  },
   "reminder_enable": {
     "type": "bool",
     "description": "开启高频循环提醒",
