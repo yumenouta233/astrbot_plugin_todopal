@@ -78,6 +78,47 @@ class TodoPalPlugin(Star):
                 return None
 
     @staticmethod
+    def _persona_text_from_data(persona_data):
+        if not persona_data:
+            return ""
+        if isinstance(persona_data, str):
+            return persona_data.strip()
+        if isinstance(persona_data, dict):
+            for key in ("prompt", "system_prompt", "content", "description", "text"):
+                value = persona_data.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            name = persona_data.get("name")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+            return ""
+        for key in ("prompt", "system_prompt", "content", "description", "text", "name"):
+            value = getattr(persona_data, key, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    async def _get_persona_instruction(self, persona: str, custom_prompt: str) -> str:
+        if custom_prompt:
+            return f"人格设定：\n{custom_prompt}\n"
+        if not persona:
+            return ""
+        persona_text = ""
+        get_persona = getattr(self.context, "get_persona", None)
+        if callable(get_persona):
+            try:
+                persona_obj = get_persona(persona)
+                if asyncio.iscoroutine(persona_obj):
+                    persona_obj = await persona_obj
+                persona_text = self._persona_text_from_data(persona_obj)
+            except Exception as e:
+                logger.debug(f"Get persona failed for {persona}: {e}")
+        if persona_text:
+            return f"人格设定：\n{persona_text}\n"
+        logger.debug(f"Persona details not found for {persona}, fallback to id prompt")
+        return f"人格设定ID：{persona}\n"
+
+    @staticmethod
     def _normalize_date_str(date_text: str):
         if not date_text:
             return None
@@ -132,7 +173,7 @@ class TodoPalPlugin(Star):
         merged_text = f"{lead_text}\n\n{body_text}" if body_text else lead_text
         if not persona and not custom_prompt:
             return event.plain_result(merged_text)
-        persona_instruction = f"人格设定：\n{custom_prompt}\n" if custom_prompt else f"人格设定ID：{persona}\n"
+        persona_instruction = await self._get_persona_instruction(persona, custom_prompt)
         provider_id = await self._get_provider_id_from_origin(event.unified_msg_origin)
         if not provider_id:
             logger.debug("Persona prefix fallback: provider_id not found")
@@ -145,7 +186,7 @@ class TodoPalPlugin(Star):
 只输出一句开场白，不要输出列表，不要加引号。
 """
         try:
-            resp = await self.context.llm_generate(provider_id, prompt)
+            resp = await self.context.llm_generate(chat_provider_id=provider_id, prompt=prompt)
             if resp and hasattr(resp, "completion_text") and resp.completion_text:
                 prefix = resp.completion_text.strip().splitlines()[0].strip()
                 if prefix:
@@ -220,13 +261,7 @@ class TodoPalPlugin(Star):
         
         persona = self.config.get("bot_persona", "")
         custom_prompt = self.config.get("bot_persona_prompt", "")
-        
-        # Priority: custom_prompt > persona ID
-        persona_instruction = ""
-        if custom_prompt:
-            persona_instruction = f"请严格遵守以下人格设定：\n{custom_prompt}\n"
-        elif persona:
-            persona_instruction = f"请使用 ID 为 {persona} 的人格语气回复。\n"
+        persona_instruction = await self._get_persona_instruction(persona, custom_prompt)
         
         prompt = f"""
 {persona_instruction}
@@ -244,7 +279,7 @@ class TodoPalPlugin(Star):
         if not provider_id:
             return False
         
-        resp = await self.context.llm_generate(provider_id, prompt)
+        resp = await self.context.llm_generate(chat_provider_id=provider_id, prompt=prompt)
         if resp and hasattr(resp, 'completion_text'):
             msg = resp.completion_text
             await self.context.send_message(origin, msg)
@@ -260,13 +295,7 @@ class TodoPalPlugin(Star):
             
         persona = self.config.get("bot_persona", "")
         custom_prompt = self.config.get("bot_persona_prompt", "")
-        
-        # Priority: custom_prompt > persona ID
-        persona_instruction = ""
-        if custom_prompt:
-            persona_instruction = f"请严格遵守以下人格设定：\n{custom_prompt}\n"
-        elif persona:
-            persona_instruction = f"请使用 ID 为 {persona} 的人格语气回复。\n"
+        persona_instruction = await self._get_persona_instruction(persona, custom_prompt)
         
         prompt = f"""
 {persona_instruction}
@@ -280,7 +309,7 @@ class TodoPalPlugin(Star):
         if not provider_id:
             return False
         
-        resp = await self.context.llm_generate(provider_id, prompt)
+        resp = await self.context.llm_generate(chat_provider_id=provider_id, prompt=prompt)
         if resp and hasattr(resp, 'completion_text'):
             msg = resp.completion_text
             await self.context.send_message(origin, msg)
@@ -295,14 +324,8 @@ class TodoPalPlugin(Star):
         if not persona and not custom_prompt:
             return event.plain_result(plain_text)
 
-        # Priority: custom_prompt > persona ID
-        persona_instruction = ""
-        if custom_prompt:
-            persona_instruction = f"人格设定：\n{custom_prompt}\n"
-        else:
-            persona_instruction = f"人格设定ID：{persona}\n请将回复风格调整为该人格设定的语气和表达习惯。\n"
+        persona_instruction = await self._get_persona_instruction(persona, custom_prompt)
 
-        # Use LLM to rephrase
         prompt = f"""
 你是一个助手。请根据以下人格设定，将括号里的系统提示转化为符合人设的自然回复。
 {persona_instruction}
@@ -316,7 +339,7 @@ class TodoPalPlugin(Star):
             if not provider_id:
                 logger.debug("Persona fallback: provider_id not found")
                 return event.plain_result(plain_text)
-            resp = await self.context.llm_generate(provider_id, prompt)
+            resp = await self.context.llm_generate(chat_provider_id=provider_id, prompt=prompt)
             if resp and hasattr(resp, 'completion_text') and resp.completion_text:
                 return event.plain_result(resp.completion_text)
             logger.debug("Persona fallback: empty llm response")
