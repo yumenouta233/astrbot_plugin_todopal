@@ -48,11 +48,38 @@ class TodoPalPlugin(Star):
         # Start cron loop for proactive messaging
         self._cron_task = asyncio.create_task(self._cron_loop())
         self._last_rollover_date = ""
+        self._last_summary_sent = {}
+
+    @staticmethod
+    def _normalize_hhmm(value: str, default: str) -> str:
+        try:
+            parts = str(value).split(":")
+            if len(parts) != 2:
+                return default
+            hour = int(parts[0])
+            minute = int(parts[1])
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                return default
+            return f"{hour:02d}:{minute:02d}"
+        except Exception:
+            return default
+
+    async def _get_provider_id_from_origin(self, origin: str):
+        if not origin:
+            return None
+        try:
+            return await self.context.get_current_chat_provider_id(umo=origin)
+        except TypeError:
+            return await self.context.get_current_chat_provider_id(origin)
+        except Exception:
+            try:
+                return await self.context.get_current_chat_provider_id(origin)
+            except Exception:
+                return None
 
     async def _cron_loop(self):
         """Background task to handle reminders and summaries."""
         logger.info("TodoPal cron loop started.")
-        # Store last reminder time per user
         last_reminders = {}
         
         while True:
@@ -60,40 +87,41 @@ class TodoPalPlugin(Star):
                 now = datetime.now()
                 current_time_str = now.strftime("%H:%M")
                 today_str = now.strftime("%Y-%m-%d")
+                summary_time = self._normalize_hhmm(self.config.get("summary_time", "23:00"), "23:00")
+                reminder_start = self._normalize_hhmm(self.config.get("reminder_start", "09:00"), "09:00")
+                reminder_end = self._normalize_hhmm(self.config.get("reminder_end", "22:00"), "22:00")
                 
-                # 1. Daily Rollover check
                 if self.config.get("auto_rollover", True):
                     if today_str != self._last_rollover_date:
                         self._do_rollover(today_str)
                         self._last_rollover_date = today_str
 
-                # 2. Check users for reminders / summaries
                 users = self.storage.get_all_users()
                 for u in users:
                     platform = u['platform']
                     user_id = u['user_id']
                     origin = u['origin']
+                    cached_provider_id = u.get("provider_id")
+                    user_key = f"{platform}_{user_id}"
                     
-                    # Summary Logic
-                    if self.config.get("summary_enable", True) and current_time_str == self.config.get("summary_time", "23:00"):
-                        await self._send_proactive_summary(platform, user_id, origin, today_str)
+                    if self.config.get("summary_enable", True):
+                        if current_time_str >= summary_time and self._last_summary_sent.get(user_key) != today_str:
+                            sent = await self._send_proactive_summary(platform, user_id, origin, today_str, cached_provider_id)
+                            if sent:
+                                self._last_summary_sent[user_key] = today_str
                     
-                    # Reminder Logic
                     if self.config.get("reminder_enable", False):
-                        start_time = self.config.get("reminder_start", "09:00")
-                        end_time = self.config.get("reminder_end", "22:00")
-                        if start_time <= current_time_str <= end_time:
-                            last_time = last_reminders.get(user_id)
+                        if reminder_start <= current_time_str <= reminder_end:
+                            last_time = last_reminders.get(user_key)
                             interval_hours = self.config.get("reminder_interval", 2)
                             if not last_time or (now - last_time).total_seconds() >= interval_hours * 3600:
-                                sent = await self._send_proactive_reminder(platform, user_id, origin, today_str)
+                                sent = await self._send_proactive_reminder(platform, user_id, origin, today_str, cached_provider_id)
                                 if sent:
-                                    last_reminders[user_id] = now
+                                    last_reminders[user_key] = now
                                     
             except Exception as e:
                 logger.error(f"TodoPal cron loop error: {e}")
             
-            # Sleep for 1 minute before checking again
             await asyncio.sleep(60)
 
     def _do_rollover(self, today_str: str):
@@ -104,13 +132,13 @@ class TodoPalPlugin(Star):
             if rolled > 0:
                 logger.info(f"Rolled over {rolled} items for {u['user_id']}")
 
-    async def _send_proactive_summary(self, platform, user_id, origin, today_str):
+    async def _send_proactive_summary(self, platform, user_id, origin, today_str, cached_provider_id=None) -> bool:
         todos = self.storage.load_todos(platform, user_id, today_str)
         if not todos:
-            return
+            return False
             
         completed = [t for t in todos if t.get('status') == 'done']
-        pending = [t for t in todos if t.get('status') != 'done']
+        pending = [t for t in todos if t.get('status') == 'pending']
         
         persona = self.config.get("bot_persona", "")
         custom_prompt = self.config.get("bot_persona_prompt", "")
@@ -134,17 +162,20 @@ class TodoPalPlugin(Star):
 请生成一段总结性的话语，主动发给用户，语气要自然。不要返回JSON，直接返回要说的话。
 """
         logger.debug(f"Proactive summary prompt: {prompt}")
-        provider_id = await self.context.get_current_chat_provider_id(umo=origin)
-        if not provider_id: return
+        provider_id = cached_provider_id or await self._get_provider_id_from_origin(origin)
+        if not provider_id:
+            return False
         
         resp = await self.context.llm_generate(provider_id, prompt)
         if resp and hasattr(resp, 'completion_text'):
             msg = resp.completion_text
             await self.context.send_message(origin, msg)
+            return True
+        return False
 
-    async def _send_proactive_reminder(self, platform, user_id, origin, today_str) -> bool:
+    async def _send_proactive_reminder(self, platform, user_id, origin, today_str, cached_provider_id=None) -> bool:
         todos = self.storage.load_todos(platform, user_id, today_str)
-        pending = [t for t in todos if t.get('status') != 'done']
+        pending = [t for t in todos if t.get('status') == 'pending']
         
         if not pending:
             return False # Nothing to remind
@@ -167,8 +198,9 @@ class TodoPalPlugin(Star):
 请生成一段简短的话语，主动提醒用户去完成任务，语气要自然。不要返回JSON，直接返回要说的话。
 """
         logger.debug(f"Proactive reminder prompt: {prompt}")
-        provider_id = await self.context.get_current_chat_provider_id(umo=origin)
-        if not provider_id: return False
+        provider_id = cached_provider_id or await self._get_provider_id_from_origin(origin)
+        if not provider_id:
+            return False
         
         resp = await self.context.llm_generate(provider_id, prompt)
         if resp and hasattr(resp, 'completion_text'):
@@ -190,7 +222,7 @@ class TodoPalPlugin(Star):
         if custom_prompt:
             persona_instruction = f"人格设定：\n{custom_prompt}\n"
         else:
-            persona_instruction = f"人格设定ID：{persona} (请尝试扮演这个角色)\n"
+            persona_instruction = f"人格设定ID：{persona}\n请将回复风格调整为该人格设定的语气和表达习惯。\n"
 
         # Use LLM to rephrase
         prompt = f"""
@@ -202,12 +234,7 @@ class TodoPalPlugin(Star):
 """
         logger.debug(f"Reply persona prompt: {prompt}")
         try:
-            # We need provider_id. Try to get it from event.
-            try:
-                umo = event.unified_msg_origin
-                provider_id = await self.context.get_current_chat_provider_id(umo=umo)
-            except:
-                provider_id = await self.context.get_current_chat_provider_id(event.unified_msg_origin)
+            provider_id = await self._get_provider_id_from_origin(event.unified_msg_origin)
             
             if provider_id:
                 resp = await self.context.llm_generate(provider_id, prompt)
@@ -293,8 +320,8 @@ class TodoPalPlugin(Star):
         except (AttributeError, IndexError):
             platform = "unknown"
 
-        # Register user for proactive messaging
-        self.storage.register_user(platform, user_id, event.unified_msg_origin)
+        provider_id_for_user = await self._get_provider_id_from_origin(event.unified_msg_origin)
+        self.storage.register_user(platform, user_id, event.unified_msg_origin, provider_id_for_user)
 
         # --- Handle 'check' command ---
         if command_prefix == 'check':
@@ -323,17 +350,7 @@ class TodoPalPlugin(Star):
                 yield result
             return
 
-        # --- Handle 'todo' and 'add' commands (require LLM) ---
-        # Get LLM Provider ID
-        try:
-            umo = event.unified_msg_origin
-            provider_id = await self.context.get_current_chat_provider_id(umo=umo)
-        except TypeError:
-            provider_id = await self.context.get_current_chat_provider_id(event.unified_msg_origin)
-        except Exception as e:
-            logger.error(f"Failed to get provider ID: {e}")
-            yield event.plain_result("无法获取当前的 LLM Provider ID，请检查配置。")
-            return
+        provider_id = provider_id_for_user
 
         if not provider_id:
             yield event.plain_result("未配置 LLM Provider。")

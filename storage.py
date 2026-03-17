@@ -4,6 +4,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Union
+import uuid
 
 logger = logging.getLogger("astrbot")
 
@@ -32,18 +33,20 @@ class TodoStorage:
             with open(self.users_file, 'w', encoding='utf-8') as f:
                 json.dump({}, f)
 
-    def register_user(self, platform: str, user_id: str, origin: str):
+    def register_user(self, platform: str, user_id: str, origin: str, provider_id: Optional[str] = None):
         """Register or update a user's unified message origin for proactive messaging."""
         try:
             with open(self.users_file, 'r', encoding='utf-8') as f:
                 users = json.load(f)
             
             key = f"{platform}_{user_id}"
+            existing = users.get(key, {})
             users[key] = {
                 "platform": platform,
                 "user_id": user_id,
                 "origin": origin,
-                "last_active": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                "last_active": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "provider_id": provider_id or existing.get("provider_id", "")
             }
             
             with open(self.users_file, 'w', encoding='utf-8') as f:
@@ -116,7 +119,27 @@ class TodoStorage:
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 if isinstance(data, list):
-                    return data
+                    fixed = []
+                    changed = False
+                    id_to_index = {}
+                    for item in data:
+                        if not isinstance(item, dict):
+                            continue
+                        normalized = dict(item)
+                        if normalized.get("date") != date_str:
+                            normalized["date"] = date_str
+                            changed = True
+                        item_id = normalized.get("id")
+                        if item_id and item_id in id_to_index:
+                            changed = True
+                            fixed[id_to_index[item_id]] = normalized
+                        else:
+                            if item_id:
+                                id_to_index[item_id] = len(fixed)
+                            fixed.append(normalized)
+                    if changed:
+                        self.save_todos(platform, user_id, date_str, fixed)
+                    return fixed
                 logger.warning(f"Data in {file_path} is not a list. Returning empty list.")
                 return []
         except (json.JSONDecodeError, OSError) as e:
@@ -131,21 +154,41 @@ class TodoStorage:
         if not from_todos:
             return 0
             
-        pending_items = [t for t in from_todos if t.get('status') != 'done']
+        pending_items = [t for t in from_todos if t.get('status') == 'pending']
         if not pending_items:
             return 0
-            
-        # Append to target date
-        self.append_todos(platform, user_id, to_date_str, pending_items)
-        
-        # Mark as rolled over in old file (optional, but good for data consistency)
+
+        target_todos = self.load_todos(platform, user_id, to_date_str)
+        existing_rollover_sources = {
+            t.get("rollover_source_id")
+            for t in target_todos
+            if isinstance(t, dict) and t.get("rollover_source_id")
+        }
+        carry_items = []
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for item in pending_items:
+            source_id = item.get("id", "")
+            if source_id and source_id in existing_rollover_sources:
+                continue
+            copied = dict(item)
+            copied["date"] = to_date_str
+            copied["id"] = f"{to_date_str.replace('-', '')}-{uuid.uuid4().hex[:6]}"
+            copied["status"] = "pending"
+            copied["updated_at"] = now_str
+            copied["rollover_source_id"] = source_id
+            copied["rollover_from_date"] = from_date_str
+            carry_items.append(copied)
+
+        if carry_items:
+            self.append_todos(platform, user_id, to_date_str, carry_items)
+
         for t in from_todos:
-            if t.get('status') != 'done':
+            if t.get('status') == 'pending':
                 t['status'] = 'rolled_over'
-                t['updated_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                t['updated_at'] = now_str
         self.save_todos(platform, user_id, from_date_str, from_todos)
-        
-        return len(pending_items)
+
+        return len(carry_items)
 
     def save_todos(self, platform: str, user_id: str, date_str: str, todos: List[Dict]):
         """
