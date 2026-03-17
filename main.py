@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import asyncio
+import inspect
 from datetime import datetime, timedelta
 from astrbot.api.message_components import Plain
 
@@ -195,6 +196,122 @@ class TodoPalPlugin(Star):
         except Exception as e:
             logger.error(f"Persona prefix failed: {e}")
         return event.plain_result(merged_text)
+
+    @staticmethod
+    def _extract_completion_text(response) -> str:
+        if response is None:
+            return ""
+        if isinstance(response, str):
+            return response.strip()
+        text = getattr(response, "completion_text", None)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+        content = getattr(response, "content", None)
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        return ""
+
+    @staticmethod
+    def _sanitize_intro_text(text: str) -> str:
+        if not text:
+            return ""
+        one_line = re.sub(r"\s+", " ", str(text)).strip()
+        one_line = one_line.replace("\n", " ").strip()
+        if not one_line:
+            return ""
+        one_line = re.sub(r"^[\-\d\.\)\s]+", "", one_line).strip()
+        if one_line.endswith(("?", "？")):
+            one_line = one_line[:-1].rstrip() + "。"
+        if len(one_line) > 60:
+            one_line = one_line[:60].rstrip("，,;；。.!！？?") + "。"
+        return one_line
+
+    async def _iter_llm_stream_chunks(self, provider_id: str, prompt: str):
+        method = getattr(self.context, "llm_generate", None)
+        if not callable(method):
+            return
+        result = method(chat_provider_id=provider_id, prompt=prompt, stream=True)
+        if inspect.isawaitable(result):
+            result = await result
+        if result is None:
+            return
+        if hasattr(result, "__aiter__"):
+            async for chunk in result:
+                text = self._extract_completion_text(chunk)
+                if text:
+                    yield text
+            return
+        if hasattr(result, "__iter__") and not isinstance(result, (str, bytes, dict)):
+            for chunk in result:
+                text = self._extract_completion_text(chunk)
+                if text:
+                    yield text
+            return
+        text = self._extract_completion_text(result)
+        if text:
+            yield text
+
+    async def _generate_check_intro_segments(self, event: AstrMessageEvent, title: str, todos: list):
+        persona = self.config.get("bot_persona", "")
+        custom_prompt = self.config.get("bot_persona_prompt", "")
+        persona_instruction = await self._get_persona_instruction(persona, custom_prompt)
+        provider_id = await self._get_provider_id_from_origin(event.unified_msg_origin)
+        if not provider_id:
+            return []
+
+        prompt = f"""
+你是一个待办助手。请先给用户一句自然回应，再由系统发送清单详情。
+{persona_instruction}
+场景：用户请求查看待办事项。
+清单标题：{title}
+待办数量：{len(todos)}
+
+要求：
+1. 只输出一句短句，不超过30字。
+2. 不要提问，不要反问，不要输出列表。
+3. 语气自然、贴合人格设定。
+"""
+        stream_text = ""
+        try:
+            async for piece in self._iter_llm_stream_chunks(provider_id, prompt):
+                if piece:
+                    stripped_piece = piece.strip()
+                    if not stripped_piece:
+                        continue
+                    if stream_text and stripped_piece.startswith(stream_text):
+                        stream_text = stripped_piece
+                    elif stripped_piece.startswith(stream_text):
+                        stream_text = stripped_piece
+                    else:
+                        stream_text += stripped_piece
+            if stream_text:
+                merged = self._sanitize_intro_text(stream_text)
+                if merged:
+                    segments = []
+                    buf = ""
+                    for ch in merged:
+                        buf += ch
+                        if ch in "，。！？；,.!?;" or len(buf) >= 18:
+                            part = buf.strip()
+                            if part:
+                                segments.append(part)
+                            buf = ""
+                    tail = buf.strip()
+                    if tail:
+                        segments.append(tail)
+                    if segments:
+                        return segments
+        except Exception as e:
+            logger.debug(f"Stream intro failed, fallback to non-stream: {e}")
+
+        try:
+            resp = await self.context.llm_generate(chat_provider_id=provider_id, prompt=prompt)
+            final_text = self._sanitize_intro_text(self._extract_completion_text(resp))
+            if final_text:
+                return [final_text]
+        except Exception as e:
+            logger.debug(f"Non-stream intro failed: {e}")
+        return []
 
     async def _cron_loop(self):
         """Background task to handle reminders and summaries."""
@@ -676,7 +793,14 @@ class TodoPalPlugin(Star):
             yield await self._reply_with_persona(event, empty_text)
             return
         preview = self._format_preview(todos, include_confirm_prompt=False)
-        yield await self._reply_with_persona_prefix(event, title, preview)
+        intro_segments = await self._generate_check_intro_segments(event, title, todos)
+        if intro_segments:
+            for seg in intro_segments:
+                yield event.plain_result(seg)
+        else:
+            fallback_intro = await self._reply_with_persona(event, title.replace("：", ""))
+            yield fallback_intro
+        yield event.plain_result(f"{title}\n\n{preview}")
 
     async def _handle_fix_command(self, event: AstrMessageEvent, platform: str, user_id: str, content: str):
         """
