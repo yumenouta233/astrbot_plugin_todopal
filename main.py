@@ -21,7 +21,7 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.5.0")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.6.0")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
@@ -76,6 +76,84 @@ class TodoPalPlugin(Star):
                 return await self.context.get_current_chat_provider_id(origin)
             except Exception:
                 return None
+
+    @staticmethod
+    def _normalize_date_str(date_text: str):
+        if not date_text:
+            return None
+        txt = str(date_text).strip()
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+            try:
+                return datetime.strptime(txt, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+        matched = re.match(r"^(\d{1,2})月(\d{1,2})日$", txt)
+        if matched:
+            now = datetime.now()
+            month = int(matched.group(1))
+            day = int(matched.group(2))
+            try:
+                return datetime(now.year, month, day).strftime("%Y-%m-%d")
+            except ValueError:
+                return None
+        return None
+
+    def _resolve_check_date(self, query_text: str = "", payload=None):
+        payload_date = None
+        if isinstance(payload, dict):
+            payload_date = self._normalize_date_str(payload.get("date"))
+        elif isinstance(payload, str):
+            payload_date = self._normalize_date_str(payload)
+        if payload_date:
+            return payload_date
+        text = (query_text or "").strip()
+        now = datetime.now()
+        if "后天" in text:
+            return (now + timedelta(days=2)).strftime("%Y-%m-%d")
+        if "明天" in text:
+            return (now + timedelta(days=1)).strftime("%Y-%m-%d")
+        if "今天" in text:
+            return now.strftime("%Y-%m-%d")
+        explicit = re.search(r"(\d{4}[-/]\d{1,2}[-/]\d{1,2})", text)
+        if explicit:
+            parsed = self._normalize_date_str(explicit.group(1))
+            if parsed:
+                return parsed
+        md = re.search(r"(\d{1,2})月(\d{1,2})日", text)
+        if md:
+            parsed = self._normalize_date_str(f"{md.group(1)}月{md.group(2)}日")
+            if parsed:
+                return parsed
+        return now.strftime("%Y-%m-%d")
+
+    async def _reply_with_persona_prefix(self, event, lead_text: str, body_text: str):
+        persona = self.config.get("bot_persona", "")
+        custom_prompt = self.config.get("bot_persona_prompt", "")
+        merged_text = f"{lead_text}\n\n{body_text}" if body_text else lead_text
+        if not persona and not custom_prompt:
+            return event.plain_result(merged_text)
+        persona_instruction = f"人格设定：\n{custom_prompt}\n" if custom_prompt else f"人格设定ID：{persona}\n"
+        provider_id = await self._get_provider_id_from_origin(event.unified_msg_origin)
+        if not provider_id:
+            logger.debug("Persona prefix fallback: provider_id not found")
+            return event.plain_result(merged_text)
+        prompt = f"""
+你是一个助手。请根据以下人格设定，生成一句简短开场白，语气自然，不超过30字。
+{persona_instruction}
+开场白意图：{lead_text}
+
+只输出一句开场白，不要输出列表，不要加引号。
+"""
+        try:
+            resp = await self.context.llm_generate(provider_id, prompt)
+            if resp and hasattr(resp, "completion_text") and resp.completion_text:
+                prefix = resp.completion_text.strip().splitlines()[0].strip()
+                if prefix:
+                    return event.plain_result(f"{prefix}\n\n{body_text}" if body_text else prefix)
+            logger.debug("Persona prefix fallback: empty llm response")
+        except Exception as e:
+            logger.error(f"Persona prefix failed: {e}")
+        return event.plain_result(merged_text)
 
     async def _cron_loop(self):
         """Background task to handle reminders and summaries."""
@@ -235,15 +313,16 @@ class TodoPalPlugin(Star):
         logger.debug(f"Reply persona prompt: {prompt}")
         try:
             provider_id = await self._get_provider_id_from_origin(event.unified_msg_origin)
-            
-            if provider_id:
-                resp = await self.context.llm_generate(provider_id, prompt)
-                if resp and hasattr(resp, 'completion_text'):
-                    return event.plain_result(resp.completion_text)
+            if not provider_id:
+                logger.debug("Persona fallback: provider_id not found")
+                return event.plain_result(plain_text)
+            resp = await self.context.llm_generate(provider_id, prompt)
+            if resp and hasattr(resp, 'completion_text') and resp.completion_text:
+                return event.plain_result(resp.completion_text)
+            logger.debug("Persona fallback: empty llm response")
         except Exception as e:
             logger.error(f"Persona reply failed: {e}")
         
-        # Fallback
         return event.plain_result(plain_text)
 
     def _format_preview(self, todos: list, include_confirm_prompt: bool = True) -> str:
@@ -323,9 +402,8 @@ class TodoPalPlugin(Star):
         provider_id_for_user = await self._get_provider_id_from_origin(event.unified_msg_origin)
         self.storage.register_user(platform, user_id, event.unified_msg_origin, provider_id_for_user)
 
-        # --- Handle 'check' command ---
         if command_prefix == 'check':
-            yield await self._handle_check_command(event, platform, user_id)
+            yield await self._handle_check_command(event, platform, user_id, todo_content, None)
             return
 
         if not todo_content:
@@ -372,7 +450,7 @@ class TodoPalPlugin(Star):
             payload = intent_result.get('payload')
             
             if intent_type == 'check':
-                async for result in self._handle_check_command(event, platform, user_id):
+                async for result in self._handle_check_command(event, platform, user_id, todo_content, payload):
                     yield result
                 return
                 
@@ -445,6 +523,12 @@ class TodoPalPlugin(Star):
         }
 
         preview = self._format_preview(todos, include_confirm_prompt=True)
+        todo_count = len(todos)
+        date_count = len({t.get("date") for t in todos if t.get("date")})
+        if date_count > 1:
+            lead_text = f"我先帮你整理了 {todo_count} 项待办，覆盖 {date_count} 天，确认后就保存。"
+        else:
+            lead_text = f"我先帮你整理了 {todo_count} 项待办，确认后就保存。"
         
         if command_prefix == 'todo_old_overwrite_mode_disabled':
             # Check if data exists for today to warn user
@@ -456,7 +540,7 @@ class TodoPalPlugin(Star):
             
             yield await self._reply_with_persona(event, f"【新建/覆盖模式】{warning}\n{preview}")
         else:
-            yield await self._reply_with_persona(event, f"【追加模式】\n{preview}")
+            yield await self._reply_with_persona_prefix(event, lead_text, preview)
 
     @filter.regex(r"^(确认|取消)$")
     async def handle_confirmation(self, event: AstrMessageEvent):
@@ -547,19 +631,29 @@ class TodoPalPlugin(Star):
         
         yield await self._reply_with_persona(event, f"太棒了！已更新状态：\n\n{preview}")
 
-    async def _handle_check_command(self, event: AstrMessageEvent, platform: str, user_id: str):
-        """
-        Handle 'check' command to view today's todos.
-        """
+    async def _handle_check_command(self, event: AstrMessageEvent, platform: str, user_id: str, query_text: str = "", payload=None):
+        target_date = self._resolve_check_date(query_text, payload)
+        todos = self.storage.load_todos(platform, user_id, target_date)
         today = datetime.now().strftime("%Y-%m-%d")
-        todos = self.storage.load_todos(platform, user_id, today)
-        
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        after_tomorrow = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d")
+        if target_date == today:
+            title = "今日待办清单："
+            empty_text = "今天还没有待办事项哦。"
+        elif target_date == tomorrow:
+            title = "明日待办清单："
+            empty_text = "明天还没有待办事项哦。"
+        elif target_date == after_tomorrow:
+            title = "后日待办清单："
+            empty_text = "后天还没有待办事项哦。"
+        else:
+            title = f"{target_date} 待办清单："
+            empty_text = f"{target_date} 还没有待办事项哦。"
         if not todos:
-            yield await self._reply_with_persona(event, "今天还没有待办事项哦。")
+            yield await self._reply_with_persona(event, empty_text)
             return
-            
         preview = self._format_preview(todos, include_confirm_prompt=False)
-        yield await self._reply_with_persona(event, f"今日待办清单：\n\n{preview}")
+        yield await self._reply_with_persona_prefix(event, title, preview)
 
     async def _handle_fix_command(self, event: AstrMessageEvent, platform: str, user_id: str, content: str):
         """

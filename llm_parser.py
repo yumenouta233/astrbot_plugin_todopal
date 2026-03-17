@@ -6,6 +6,33 @@ from astrbot.api.star import Context
 
 logger = logging.getLogger("astrbot")
 
+def _extract_json_candidate(text: str) -> str:
+    if not text:
+        return ""
+    stripped = text.strip()
+    match = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", stripped, re.DOTALL)
+    if match:
+        return match.group(0).strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        stripped = "\n".join(lines).strip()
+    return stripped
+
+def _validate_parsed_data(data, expect_list: bool):
+    if expect_list:
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict) and "todos" in data and isinstance(data["todos"], list):
+            return data["todos"]
+        return None
+    if isinstance(data, dict):
+        return data
+    return None
+
 async def parse_todo(context: Context, provider_id: str, text: str) -> list:
     """
     Parse natural language text into todo items using LLM.
@@ -48,7 +75,7 @@ async def analyze_intent(context: Context, provider_id: str, text: str, current_
       - add: list of todo items (dicts)
       - done: list of indices (1-based) or content strings
       - fix: {'index': int, 'content': str}
-      - check: None
+      - check: {'date': 'YYYY-MM-DD'} or null
     """
     if not text.strip():
         return None
@@ -102,15 +129,18 @@ async def analyze_intent(context: Context, provider_id: str, text: str, current_
     "payload": "2 开会" // 格式必须是 "序号 新内容"
 }}
 
-4. 查看事项 ("看看还有什么" 或 "列出清单"):
+4. 查看事项 ("看看还有什么"、"我明天做什么" 或 "列出清单"):
 {{
     "type": "check",
-    "payload": null
+    "payload": {{"date": "{today_str}"}}
 }}
 
 要求：
 1. 必须返回合法的 JSON 对象。
 2. 不要返回 markdown 格式，只返回 JSON 字符串。
+3. 当 type = "check" 时：
+   - 如果用户提到了明确日期或相对日期（今天/明天/后天），payload 返回 {{"date":"YYYY-MM-DD"}}。
+   - 如果没有提日期，payload 返回 null。
 """
 
     result = await _call_llm_and_parse_json(context, provider_id, prompt, expect_list=False)
@@ -123,7 +153,7 @@ async def _call_llm_and_parse_json(context: Context, provider_id: str, prompt: s
             prompt=prompt
         )
         if hasattr(response, "completion_text"):
-             response = response.completion_text
+            response = response.completion_text
     except Exception as e:
         logger.error(f"LLM call failed: {e}")
         return None
@@ -131,30 +161,44 @@ async def _call_llm_and_parse_json(context: Context, provider_id: str, prompt: s
     if not response:
         logger.warning("LLM returned empty response")
         return None
-
-    # Clean up JSON
-    match = re.search(r"(\{.*\}|\[.*\])", response, re.DOTALL)
-    if match:
-        cleaned_response = match.group(0)
-    else:
-        cleaned_response = response.strip()
-        if cleaned_response.startswith("```"):
-            lines = cleaned_response.splitlines()
-            if lines[0].strip().startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip().startswith("```"):
-                lines = lines[:-1]
-            cleaned_response = "\n".join(lines).strip()
-
+    cleaned_response = _extract_json_candidate(response)
     try:
         data = json.loads(cleaned_response)
-        if expect_list and not isinstance(data, list):
-             # Fallback: maybe it returned a dict wrapper?
-             if isinstance(data, dict) and "todos" in data:
-                 return data["todos"]
-             logger.warning(f"LLM did not return a list: {cleaned_response}")
-             return None
-        return data
+        validated = _validate_parsed_data(data, expect_list)
+        if validated is not None:
+            return validated
+    except json.JSONDecodeError:
+        pass
+
+    repair_prompt = f"""
+请把下面内容修复为严格 JSON。
+要求：
+1. 只输出 JSON，不要额外文字，不要 markdown。
+2. 如果是列表模式，输出 JSON 数组；如果是对象模式，输出 JSON 对象。
+3. 保留原有语义，不要凭空新增信息。
+
+原始内容：
+{response}
+"""
+    try:
+        repaired = await context.llm_generate(
+            chat_provider_id=provider_id,
+            prompt=repair_prompt
+        )
+        if hasattr(repaired, "completion_text"):
+            repaired = repaired.completion_text
+    except Exception as e:
+        logger.error(f"LLM repair failed: {e}")
+        return None
+
+    repaired_text = _extract_json_candidate(repaired or "")
+    try:
+        repaired_data = json.loads(repaired_text)
+        validated = _validate_parsed_data(repaired_data, expect_list)
+        if validated is not None:
+            return validated
+        logger.warning(f"LLM repaired JSON type invalid: {repaired_text}")
+        return None
     except json.JSONDecodeError as e:
-        logger.error(f"JSON parsing failed: {e}. Response: {response}")
+        logger.error(f"JSON parsing failed after repair: {e}. Response: {repaired}")
         return None
