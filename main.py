@@ -746,7 +746,7 @@ class TodoPalPlugin(Star):
         result = await self._service_fix(platform, user_id, index, content, date)
         yield event.plain_result(self._tool_text_response("fix", result))
 
-    @filter.regex(r"^(?:我)?(今天|明天|后天).*(待办|安排|计划|做什么).*$")
+    @filter.regex(r"^.*(今天|明天|后天).*(待办|安排|计划|做什么|干嘛|有什么事|有啥安排).*$")
     async def todo_nl_check(self, event: AstrMessageEvent):
         message_str = (event.message_str or "").strip()
         if not message_str:
