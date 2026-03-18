@@ -667,24 +667,49 @@ class TodoPalPlugin(Star):
 
     @filter.llm_tool(name="todo_check")
     async def todo_tool_check(self, event: AstrMessageEvent, date: str = ""):
+        '''查询待办清单。
+
+        Args:
+            date(string): 日期，可为空，支持今天/明天/后天/YYYY-MM-DD/M月D日
+        '''
         platform, user_id = self._event_scope(event)
         result = await self._service_check(platform, user_id, date)
         yield event.plain_result(json.dumps(result, ensure_ascii=False))
 
     @filter.llm_tool(name="todo_add")
     async def todo_tool_add(self, event: AstrMessageEvent, content: str, date: str = "", time: str = ""):
+        '''新增待办事项。
+
+        Args:
+            content(string): 待办原始内容
+            date(string): 可选日期，支持YYYY-MM-DD或自然日期表达
+            time(string): 可选时间，格式建议HH:MM
+        '''
         platform, user_id = self._event_scope(event)
         result = await self._service_add(event, platform, user_id, content, date, time)
         yield event.plain_result(json.dumps(result, ensure_ascii=False))
 
     @filter.llm_tool(name="todo_done")
     async def todo_tool_done(self, event: AstrMessageEvent, selector: str, date: str = ""):
+        '''标记待办完成。
+
+        Args:
+            selector(string): 序号、序号列表或内容关键词
+            date(string): 可选日期，不传默认今天
+        '''
         platform, user_id = self._event_scope(event)
         result = await self._service_done(platform, user_id, selector, date)
         yield event.plain_result(json.dumps(result, ensure_ascii=False))
 
     @filter.llm_tool(name="todo_fix")
     async def todo_tool_fix(self, event: AstrMessageEvent, index: int, content: str, date: str = ""):
+        '''修改指定待办内容。
+
+        Args:
+            index(number): 待办序号，从1开始
+            content(string): 新的待办内容
+            date(string): 可选日期，不传默认今天
+        '''
         platform, user_id = self._event_scope(event)
         result = await self._service_fix(platform, user_id, index, content, date)
         yield event.plain_result(json.dumps(result, ensure_ascii=False))
