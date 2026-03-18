@@ -504,7 +504,150 @@ class TodoPalPlugin(Star):
             result_lines.append("如果正确，请回复“确认”。")
         return "\n".join(result_lines)
 
-    @filter.regex(r".*")
+    def _event_scope(self, event: AstrMessageEvent):
+        user_id = event.get_sender_id()
+        try:
+            platform = event.unified_msg_origin.split(":")[0]
+        except (AttributeError, IndexError):
+            platform = "unknown"
+        return platform, user_id
+
+    def _resolve_date_input(self, date_text: str = "") -> str:
+        if not date_text:
+            return datetime.now().strftime("%Y-%m-%d")
+        parsed = self._normalize_date_str(date_text)
+        if parsed:
+            return parsed
+        return self._resolve_check_date(str(date_text), None)
+
+    def _simple_items(self, todos: list):
+        items = []
+        for idx, todo in enumerate(todos, 1):
+            items.append({
+                "index": idx,
+                "date": todo.get("date"),
+                "time": todo.get("time"),
+                "content": todo.get("content"),
+                "status": todo.get("status", "pending")
+            })
+        return items
+
+    async def _service_check(self, platform: str, user_id: str, date_text: str = ""):
+        target_date = self._resolve_date_input(date_text)
+        todos = self.storage.load_todos(platform, user_id, target_date)
+        return {
+            "ok": True,
+            "action": "check",
+            "date": target_date,
+            "count": len(todos),
+            "items": self._simple_items(todos)
+        }
+
+    async def _service_add(self, event: AstrMessageEvent, platform: str, user_id: str, content: str, date_text: str = "", time_text: str = ""):
+        source_text = (content or "").strip()
+        if not source_text:
+            return {"ok": False, "action": "add", "error": "EMPTY_CONTENT"}
+        target_date = self._resolve_date_input(date_text) if date_text else ""
+        todos = []
+        if target_date:
+            todos = [{
+                "date": target_date,
+                "time": (time_text.strip() if time_text else None),
+                "content": source_text
+            }]
+        else:
+            provider_id = await self._get_provider_id_from_origin(event.unified_msg_origin)
+            if not provider_id:
+                return {"ok": False, "action": "add", "error": "NO_PROVIDER"}
+            todos = await parse_todo(self.context, provider_id, source_text)
+            if not todos:
+                return {"ok": False, "action": "add", "error": "PARSE_FAILED"}
+        self._save_todos(platform, user_id, todos, source_text, mode='append')
+        grouped = {}
+        for todo in todos:
+            dt = todo.get("date") or datetime.now().strftime("%Y-%m-%d")
+            grouped.setdefault(dt, 0)
+            grouped[dt] += 1
+        return {
+            "ok": True,
+            "action": "add",
+            "added_count": len(todos),
+            "dates": grouped
+        }
+
+    async def _service_done(self, platform: str, user_id: str, selector: str, date_text: str = ""):
+        target_date = self._resolve_date_input(date_text)
+        todos = self.storage.load_todos(platform, user_id, target_date)
+        if not todos:
+            return {"ok": False, "action": "done", "date": target_date, "error": "EMPTY_LIST"}
+        matched_indices = TodoMatcher.match_todos(todos, selector or "")
+        if not matched_indices:
+            return {"ok": False, "action": "done", "date": target_date, "error": "NOT_FOUND"}
+        updated = []
+        for idx in matched_indices:
+            if todos[idx].get("status") != "done":
+                self.storage.update_todo_status(platform, user_id, target_date, idx, "done")
+                updated.append(idx + 1)
+        return {
+            "ok": True,
+            "action": "done",
+            "date": target_date,
+            "updated_indices": updated,
+            "updated_count": len(updated)
+        }
+
+    async def _service_fix(self, platform: str, user_id: str, index: int, content: str, date_text: str = ""):
+        target_date = self._resolve_date_input(date_text)
+        todos = self.storage.load_todos(platform, user_id, target_date)
+        if not todos:
+            return {"ok": False, "action": "fix", "date": target_date, "error": "EMPTY_LIST"}
+        if index < 1 or index > len(todos):
+            return {"ok": False, "action": "fix", "date": target_date, "error": "INDEX_OUT_OF_RANGE"}
+        cleaned_content = re.sub(r"^(改成|变为|变成|是|为|:)\s*", "", (content or "").strip()).strip()
+        if not cleaned_content:
+            return {"ok": False, "action": "fix", "date": target_date, "error": "EMPTY_CONTENT"}
+        updated = self.storage.update_todo_content(platform, user_id, target_date, index - 1, cleaned_content)
+        if not updated:
+            return {"ok": False, "action": "fix", "date": target_date, "error": "UPDATE_FAILED"}
+        return {
+            "ok": True,
+            "action": "fix",
+            "date": target_date,
+            "index": index,
+            "item": {
+                "index": index,
+                "date": updated.get("date"),
+                "time": updated.get("time"),
+                "content": updated.get("content"),
+                "status": updated.get("status", "pending")
+            }
+        }
+
+    @filter.llm_tool(name="todo_check")
+    async def todo_tool_check(self, event: AstrMessageEvent, date: str = ""):
+        platform, user_id = self._event_scope(event)
+        result = await self._service_check(platform, user_id, date)
+        yield event.plain_result(json.dumps(result, ensure_ascii=False))
+
+    @filter.llm_tool(name="todo_add")
+    async def todo_tool_add(self, event: AstrMessageEvent, content: str, date: str = "", time: str = ""):
+        platform, user_id = self._event_scope(event)
+        result = await self._service_add(event, platform, user_id, content, date, time)
+        yield event.plain_result(json.dumps(result, ensure_ascii=False))
+
+    @filter.llm_tool(name="todo_done")
+    async def todo_tool_done(self, event: AstrMessageEvent, selector: str, date: str = ""):
+        platform, user_id = self._event_scope(event)
+        result = await self._service_done(platform, user_id, selector, date)
+        yield event.plain_result(json.dumps(result, ensure_ascii=False))
+
+    @filter.llm_tool(name="todo_fix")
+    async def todo_tool_fix(self, event: AstrMessageEvent, index: int, content: str, date: str = ""):
+        platform, user_id = self._event_scope(event)
+        result = await self._service_fix(platform, user_id, index, content, date)
+        yield event.plain_result(json.dumps(result, ensure_ascii=False))
+
+    @filter.regex(r"^(todo|add|done|fix|check)\s*.*")
     async def todo_parse(self, event: AstrMessageEvent):
         """
         Parse todo items from user input.
@@ -516,22 +659,11 @@ class TodoPalPlugin(Star):
         if not message_str:
             return
 
-        # 1. Check for explicit command prefixes
         explicit_match = re.match(r"^(todo|add|done|fix|check)\s*(.*)", message_str, re.IGNORECASE)
-        
-        if explicit_match:
-            command_prefix = explicit_match.group(1).lower()
-            todo_content = explicit_match.group(2).strip()
-            # If explicit command, force smart mode for 'todo' or execute others directly
-        else:
-            # 2. Check for keywords in triggers
-            # If no keyword matches, ignore this message
-            if not any(keyword in message_str for keyword in self.triggers):
-                return
-            
-            # If matched, treat as 'todo' command (smart agent)
-            command_prefix = 'todo'
-            todo_content = message_str
+        if not explicit_match:
+            return
+        command_prefix = explicit_match.group(1).lower()
+        todo_content = explicit_match.group(2).strip()
 
         user_id = event.get_sender_id()
         try:
