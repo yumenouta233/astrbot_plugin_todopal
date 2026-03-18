@@ -746,21 +746,6 @@ class TodoPalPlugin(Star):
         result = await self._service_fix(platform, user_id, index, content, date)
         yield event.plain_result(self._tool_text_response("fix", result))
 
-    @filter.regex(r"^.*(今天|明天|后天).*(待办|安排|计划|做什么|干嘛|有什么事|有啥安排).*$")
-    async def todo_nl_check(self, event: AstrMessageEvent):
-        message_str = (event.message_str or "").strip()
-        if not message_str:
-            return
-        user_id = event.get_sender_id()
-        try:
-            platform = event.unified_msg_origin.split(":")[0]
-        except (AttributeError, IndexError):
-            platform = "unknown"
-        provider_id_for_user = await self._get_provider_id_from_origin(event.unified_msg_origin)
-        self.storage.register_user(platform, user_id, event.unified_msg_origin, provider_id_for_user)
-        async for result in self._handle_check_command(event, platform, user_id, message_str, None):
-            yield result
-
     @filter.regex(r"^(todo|add|done|fix|check)\s*.*")
     async def todo_parse(self, event: AstrMessageEvent):
         """
