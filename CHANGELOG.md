@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.7.1] - 2026-03-18
+
+### Changed
+- 统一 `add/done/fix/check` 服务层返回协议，新增标准化 `message` 字段，命令路径与工具路径共享同一套结果语义。
+- `todo` 与 `add` 的新增链路统一复用 `_service_add`，支持“仅解析预览（persist=False）+ 用户确认后保存”的一致交互。
+- `done` 与 `fix` 命令输出改为优先消费服务层结果文案，减少分散硬编码提示，提升对话一致性。
+- 清理历史遗留分支 `todo_old_overwrite_mode_disabled`，收敛到当前有效主流程（append + confirm）。
+
 ## [1.7.0] - 2026-03-18
 
 ### Added

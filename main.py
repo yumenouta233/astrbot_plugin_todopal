@@ -532,6 +532,41 @@ class TodoPalPlugin(Star):
             })
         return items
 
+    @staticmethod
+    def _service_message(action: str, ok: bool, error: str = "", **kwargs) -> str:
+        if action == "add":
+            if ok:
+                return f"已识别 {kwargs.get('count', 0)} 项待办，确认后保存。"
+            if error == "EMPTY_CONTENT":
+                return "请输入待办内容。"
+            if error == "NO_PROVIDER":
+                return "未配置 LLM Provider。"
+            return "未能识别到任何待办事项。"
+        if action == "done":
+            if ok:
+                count = kwargs.get("updated_count", 0)
+                if count == 0:
+                    return "所选的待办事项已经是完成状态啦。"
+                return f"已完成 {count} 项待办。"
+            if error == "EMPTY_LIST":
+                return "今天没有待办事项哦。"
+            if error == "NOT_FOUND":
+                return "找不到对应的待办事项，请检查描述或序号是否准确。"
+            return "处理失败，请重试。"
+        if action == "fix":
+            if ok:
+                return f"已修改第 {kwargs.get('index', 0)} 条待办。"
+            if error == "EMPTY_LIST":
+                return "今天没有待办事项，无法修改。"
+            if error == "INDEX_OUT_OF_RANGE":
+                return f"找不到第 {kwargs.get('index', 0)} 条待办。"
+            if error == "EMPTY_CONTENT":
+                return "请输入新的待办内容。"
+            return "修改失败，请重试。"
+        if action == "check":
+            return f"共 {kwargs.get('count', 0)} 项待办。"
+        return "处理完成。"
+
     async def _service_check(self, platform: str, user_id: str, date_text: str = ""):
         target_date = self._resolve_date_input(date_text)
         todos = self.storage.load_todos(platform, user_id, target_date)
@@ -540,29 +575,32 @@ class TodoPalPlugin(Star):
             "action": "check",
             "date": target_date,
             "count": len(todos),
-            "items": self._simple_items(todos)
+            "items": self._simple_items(todos),
+            "message": self._service_message("check", True, count=len(todos))
         }
 
-    async def _service_add(self, event: AstrMessageEvent, platform: str, user_id: str, content: str, date_text: str = "", time_text: str = ""):
+    async def _service_add(self, event: AstrMessageEvent, platform: str, user_id: str, content: str, date_text: str = "", time_text: str = "", persist: bool = True, parsed_todos: list = None):
         source_text = (content or "").strip()
         if not source_text:
-            return {"ok": False, "action": "add", "error": "EMPTY_CONTENT"}
-        target_date = self._resolve_date_input(date_text) if date_text else ""
-        todos = []
-        if target_date:
-            todos = [{
-                "date": target_date,
-                "time": (time_text.strip() if time_text else None),
-                "content": source_text
-            }]
-        else:
-            provider_id = await self._get_provider_id_from_origin(event.unified_msg_origin)
-            if not provider_id:
-                return {"ok": False, "action": "add", "error": "NO_PROVIDER"}
-            todos = await parse_todo(self.context, provider_id, source_text)
-            if not todos:
-                return {"ok": False, "action": "add", "error": "PARSE_FAILED"}
-        self._save_todos(platform, user_id, todos, source_text, mode='append')
+            return {"ok": False, "action": "add", "error": "EMPTY_CONTENT", "message": self._service_message("add", False, "EMPTY_CONTENT")}
+        todos = list(parsed_todos) if isinstance(parsed_todos, list) else []
+        if not todos:
+            target_date = self._resolve_date_input(date_text) if date_text else ""
+            if target_date:
+                todos = [{
+                    "date": target_date,
+                    "time": (time_text.strip() if time_text else None),
+                    "content": source_text
+                }]
+            else:
+                provider_id = await self._get_provider_id_from_origin(event.unified_msg_origin)
+                if not provider_id:
+                    return {"ok": False, "action": "add", "error": "NO_PROVIDER", "message": self._service_message("add", False, "NO_PROVIDER")}
+                todos = await parse_todo(self.context, provider_id, source_text)
+                if not todos:
+                    return {"ok": False, "action": "add", "error": "PARSE_FAILED", "message": self._service_message("add", False, "PARSE_FAILED")}
+        if persist:
+            self._save_todos(platform, user_id, todos, source_text, mode='append')
         grouped = {}
         for todo in todos:
             dt = todo.get("date") or datetime.now().strftime("%Y-%m-%d")
@@ -572,17 +610,19 @@ class TodoPalPlugin(Star):
             "ok": True,
             "action": "add",
             "added_count": len(todos),
-            "dates": grouped
+            "dates": grouped,
+            "items": todos,
+            "message": self._service_message("add", True, count=len(todos))
         }
 
     async def _service_done(self, platform: str, user_id: str, selector: str, date_text: str = ""):
         target_date = self._resolve_date_input(date_text)
         todos = self.storage.load_todos(platform, user_id, target_date)
         if not todos:
-            return {"ok": False, "action": "done", "date": target_date, "error": "EMPTY_LIST"}
+            return {"ok": False, "action": "done", "date": target_date, "error": "EMPTY_LIST", "message": self._service_message("done", False, "EMPTY_LIST")}
         matched_indices = TodoMatcher.match_todos(todos, selector or "")
         if not matched_indices:
-            return {"ok": False, "action": "done", "date": target_date, "error": "NOT_FOUND"}
+            return {"ok": False, "action": "done", "date": target_date, "error": "NOT_FOUND", "message": self._service_message("done", False, "NOT_FOUND")}
         updated = []
         for idx in matched_indices:
             if todos[idx].get("status") != "done":
@@ -593,22 +633,23 @@ class TodoPalPlugin(Star):
             "action": "done",
             "date": target_date,
             "updated_indices": updated,
-            "updated_count": len(updated)
+            "updated_count": len(updated),
+            "message": self._service_message("done", True, updated_count=len(updated))
         }
 
     async def _service_fix(self, platform: str, user_id: str, index: int, content: str, date_text: str = ""):
         target_date = self._resolve_date_input(date_text)
         todos = self.storage.load_todos(platform, user_id, target_date)
         if not todos:
-            return {"ok": False, "action": "fix", "date": target_date, "error": "EMPTY_LIST"}
+            return {"ok": False, "action": "fix", "date": target_date, "error": "EMPTY_LIST", "message": self._service_message("fix", False, "EMPTY_LIST", index=index)}
         if index < 1 or index > len(todos):
-            return {"ok": False, "action": "fix", "date": target_date, "error": "INDEX_OUT_OF_RANGE"}
+            return {"ok": False, "action": "fix", "date": target_date, "error": "INDEX_OUT_OF_RANGE", "message": self._service_message("fix", False, "INDEX_OUT_OF_RANGE", index=index)}
         cleaned_content = re.sub(r"^(改成|变为|变成|是|为|:)\s*", "", (content or "").strip()).strip()
         if not cleaned_content:
-            return {"ok": False, "action": "fix", "date": target_date, "error": "EMPTY_CONTENT"}
+            return {"ok": False, "action": "fix", "date": target_date, "error": "EMPTY_CONTENT", "message": self._service_message("fix", False, "EMPTY_CONTENT", index=index)}
         updated = self.storage.update_todo_content(platform, user_id, target_date, index - 1, cleaned_content)
         if not updated:
-            return {"ok": False, "action": "fix", "date": target_date, "error": "UPDATE_FAILED"}
+            return {"ok": False, "action": "fix", "date": target_date, "error": "UPDATE_FAILED", "message": self._service_message("fix", False, "UPDATE_FAILED", index=index)}
         return {
             "ok": True,
             "action": "fix",
@@ -620,7 +661,8 @@ class TodoPalPlugin(Star):
                 "time": updated.get("time"),
                 "content": updated.get("content"),
                 "status": updated.get("status", "pending")
-            }
+            },
+            "message": self._service_message("fix", True, index=index)
         }
 
     @filter.llm_tool(name="todo_check")
@@ -675,57 +717,42 @@ class TodoPalPlugin(Star):
         self.storage.register_user(platform, user_id, event.unified_msg_origin, provider_id_for_user)
 
         if command_prefix == 'check':
-            yield await self._handle_check_command(event, platform, user_id, todo_content, None)
+            async for result in self._handle_check_command(event, platform, user_id, todo_content, None):
+                yield result
             return
 
         if not todo_content:
             yield await self._reply_with_persona(event, f"请输入{command_prefix}的具体内容。")
             return
 
-        # --- Handle 'done' command ---
         if command_prefix == 'done':
-            # done command handles its own persona reply internally if we refactor it, 
-            # OR we refactor _handle_done_command to return string and we reply here.
-            # Currently _handle_done_command yields plain_result directly.
-            # We should refactor the helper functions to return (success, message) or just message string.
-            # But that's a big refactor. 
-            # Alternative: modifying helper functions to use _reply_with_persona.
             async for result in self._handle_done_command(event, platform, user_id, todo_content):
-                 yield result
+                yield result
             return
 
-        # --- Handle 'fix' command ---
         if command_prefix == 'fix':
             async for result in self._handle_fix_command(event, platform, user_id, todo_content):
                 yield result
             return
 
         provider_id = provider_id_for_user
-
-        if not provider_id:
-            yield event.plain_result("未配置 LLM Provider。")
-            return
-
-        # Smart handling for 'todo' command
+        add_result = None
         if command_prefix == 'todo':
+            if not provider_id:
+                yield event.plain_result("未配置 LLM Provider。")
+                return
             today = datetime.now().strftime("%Y-%m-%d")
             current_todos = self.storage.load_todos(platform, user_id, today)
-            
-            # Analyze intent
             intent_result = await analyze_intent(self.context, provider_id, todo_content, current_todos)
-            
             if not intent_result or not intent_result.get('type'):
                 yield await self._reply_with_persona(event, "抱歉，我没太理解您的意思，请换个说法试试。")
                 return
-            
             intent_type = intent_result['type']
             payload = intent_result.get('payload')
-            
             if intent_type == 'check':
                 async for result in self._handle_check_command(event, platform, user_id, todo_content, payload):
                     yield result
                 return
-                
             elif intent_type == 'done':
                 if not payload:
                      yield await self._reply_with_persona(event, "需要指定完成哪一项哦。")
@@ -733,7 +760,6 @@ class TodoPalPlugin(Star):
                 async for result in self._handle_done_command(event, platform, user_id, str(payload)):
                     yield result
                 return
-                
             elif intent_type == 'fix':
                 if not payload:
                     yield await self._reply_with_persona(event, "需要指定修改哪一项及新内容哦。")
@@ -741,50 +767,29 @@ class TodoPalPlugin(Star):
                 async for result in self._handle_fix_command(event, platform, user_id, str(payload)):
                     yield result
                 return
-                
             elif intent_type == 'add':
-                # Proceed to existing logic for adding todos
-                # Payload should be the list of todos
                 if isinstance(payload, list):
-                    todos = payload
+                    add_result = await self._service_add(event, platform, user_id, todo_content, persist=False, parsed_todos=payload)
                 else:
-                    # Fallback to old parser if payload is weird
-                    todos = await parse_todo(self.context, provider_id, todo_content)
-            
+                    add_result = await self._service_add(event, platform, user_id, todo_content, persist=False)
             elif intent_type == 'cancel':
                 yield await self._reply_with_persona(event, "好的，什么都不做。")
                 return
-                
             else:
                 yield await self._reply_with_persona(event, "抱歉，我没太理解您的意思。")
                 return
-
         else:
-            # 'add' command: always append
-            todos = await parse_todo(self.context, provider_id, todo_content)
+            add_result = await self._service_add(event, platform, user_id, todo_content, persist=False)
 
-        if todos is None:
-            yield await self._reply_with_persona(event, "暂时没有稳定识别这条待办，请换一种更明确的表达方式。")
+        if not add_result or not add_result.get("ok"):
+            fail_message = add_result.get("message") if isinstance(add_result, dict) else "未能识别到任何待办事项。"
+            if fail_message == "未配置 LLM Provider。":
+                yield event.plain_result(fail_message)
+            else:
+                yield await self._reply_with_persona(event, fail_message)
             return
-        if not todos:
-            yield await self._reply_with_persona(event, "未能识别到任何待办事项。")
-            return
-
-        # For 'todo' (smart mode), we default to append unless we want to support overwrite logic explicitly.
-        # Given the "Smart Agent" change, 'todo' implies natural language interaction which usually means "add to list".
-        # However, to preserve "Overwrite" capability, we might need a specific trigger.
-        # For now, let's make 'todo' (via intent 'add') default to 'append' to be safe, 
-        # BUT if we want to support the old "Overwrite" behavior, we might need to ask.
-        # Let's stick to 'append' for smart 'add' to avoid data loss.
-        # If user really wants to overwrite, they might need to clear first (not supported yet) or we add a "clear" intent later.
-        # Wait, the previous logic was: 'todo' = overwrite, 'add' = append.
-        # Now 'todo' = smart agent. 'add' = append.
-        # So we effectively removed "Overwrite" command unless we re-introduce it.
-        # Let's change action_type to 'append' for both, unless we add logic.
-        
+        todos = add_result.get("items") or []
         action_type = 'append' 
-        
-        # Store session state
         self.sessions[event.unified_msg_origin] = {
             'state': 'WAITING_CONFIRM',
             'action_type': action_type,
@@ -801,18 +806,7 @@ class TodoPalPlugin(Star):
             lead_text = f"我先帮你整理了 {todo_count} 项待办，覆盖 {date_count} 天，确认后就保存。"
         else:
             lead_text = f"我先帮你整理了 {todo_count} 项待办，确认后就保存。"
-        
-        if command_prefix == 'todo_old_overwrite_mode_disabled':
-            # Check if data exists for today to warn user
-            today = datetime.now().strftime("%Y-%m-%d")
-            existing = self.storage.load_todos(platform, user_id, today)
-            warning = ""
-            if existing:
-                warning = f"\n⚠️ **注意：这将覆盖您今天已有的 {len(existing)} 条待办！**"
-            
-            yield await self._reply_with_persona(event, f"【新建/覆盖模式】{warning}\n{preview}")
-        else:
-            yield await self._reply_with_persona_prefix(event, lead_text, preview)
+        yield await self._reply_with_persona_prefix(event, lead_text, preview)
 
     @filter.regex(r"^(确认|取消)$")
     async def handle_confirmation(self, event: AstrMessageEvent):
@@ -874,38 +868,30 @@ class TodoPalPlugin(Star):
         Handle marking todos as done using the 'done' prefix.
         Matches: "done 1, 2", "done 买菜"
         """
+        result = await self._service_done(platform, user_id, content, "")
+        if not result.get("ok"):
+            yield await self._reply_with_persona(event, result.get("message", "处理失败，请重试。"))
+            return
+        if result.get("updated_count", 0) == 0:
+            yield await self._reply_with_persona(event, result.get("message", "所选的待办事项已经是完成状态啦。"))
+            return
+
         today = datetime.now().strftime("%Y-%m-%d")
-        
-        todos = self.storage.load_todos(platform, user_id, today)
-        if not todos:
-            yield await self._reply_with_persona(event, f"今天没有待办事项哦。")
-            return
-
-        matched_indices = TodoMatcher.match_todos(todos, content)
-        
-        if not matched_indices:
-            yield await self._reply_with_persona(event, "找不到对应的待办事项，请检查描述或序号是否准确。")
-            return
-
-        updated_items = []
-        for idx in matched_indices:
-            if todos[idx]['status'] != 'done':
-                self.storage.update_todo_status(platform, user_id, today, idx, 'done')
-                updated_items.append(todos[idx]['content'])
-        
-        if not updated_items:
-            yield await self._reply_with_persona(event, "所选的待办事项已经是完成状态啦。")
-            return
-
-        # Reload to get the fresh state and format it
         fresh_todos = self.storage.load_todos(platform, user_id, today)
         preview = self._format_preview(fresh_todos, include_confirm_prompt=False)
-        
-        yield await self._reply_with_persona(event, f"太棒了！已更新状态：\n\n{preview}")
+        yield await self._reply_with_persona(event, f"{result.get('message', '已更新状态。')}\n\n{preview}")
 
     async def _handle_check_command(self, event: AstrMessageEvent, platform: str, user_id: str, query_text: str = "", payload=None):
         target_date = self._resolve_check_date(query_text, payload)
-        todos = self.storage.load_todos(platform, user_id, target_date)
+        service_result = await self._service_check(platform, user_id, target_date)
+        todos = []
+        for item in service_result.get("items", []):
+            todos.append({
+                "date": item.get("date"),
+                "time": item.get("time"),
+                "content": item.get("content"),
+                "status": item.get("status", "pending")
+            })
         today = datetime.now().strftime("%Y-%m-%d")
         tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
         after_tomorrow = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d")
@@ -939,39 +925,25 @@ class TodoPalPlugin(Star):
         Handle 'fix' command to modify a specific todo item content.
         Format: fix 3 改成光电数据集会议
         """
-        today = datetime.now().strftime("%Y-%m-%d")
-        todos = self.storage.load_todos(platform, user_id, today)
-        
-        if not todos:
-            yield await self._reply_with_persona(event, "今天没有待办事项，无法修改。")
-            return
-
-        # Parse index and content
         match = re.match(r"^(\d+)\s*(.*)", content)
         if not match:
             yield await self._reply_with_persona(event, "格式错误。请使用：fix 序号 新内容\n例如：fix 3 改成光电数据集会议")
             return
             
-        idx = int(match.group(1)) - 1
+        idx = int(match.group(1))
         raw_new_content = match.group(2).strip()
-        
-        if not (0 <= idx < len(todos)):
-            yield await self._reply_with_persona(event, f"找不到第 {idx+1} 条待办。")
-            return
-            
         if not raw_new_content:
             yield await self._reply_with_persona(event, "请输入新的待办内容。")
             return
 
-        # Simple cleanup: remove common prefixes like "改成", "变为"
-        cleaned_content = re.sub(r"^(改成|变为|变成|是|为|:)\s*", "", raw_new_content).strip()
-        
-        updated_item = self.storage.update_todo_content(platform, user_id, today, idx, cleaned_content)
-        
-        if updated_item:
-            # Show the updated list
+        result = await self._service_fix(platform, user_id, idx, raw_new_content, "")
+        if not result.get("ok"):
+            yield await self._reply_with_persona(event, result.get("message", "修改失败，请重试。"))
+            return
+        if result.get("ok"):
+            today = datetime.now().strftime("%Y-%m-%d")
             fresh_todos = self.storage.load_todos(platform, user_id, today)
             preview = self._format_preview(fresh_todos, include_confirm_prompt=False)
-            yield await self._reply_with_persona(event, f"已修改第 {idx+1} 条：\n\n{preview}")
+            yield await self._reply_with_persona(event, f"{result.get('message', f'已修改第 {idx} 条待办。')}\n\n{preview}")
         else:
             yield await self._reply_with_persona(event, "修改失败，请重试。")
