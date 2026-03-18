@@ -22,7 +22,7 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.6.0")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.8.0")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
@@ -565,6 +565,15 @@ class TodoPalPlugin(Star):
             return "修改失败，请重试。"
         if action == "check":
             return f"共 {kwargs.get('count', 0)} 项待办。"
+        if action == "delete":
+            if ok:
+                count = kwargs.get("deleted_count", 0)
+                return f"已删除 {count} 项待办。"
+            if error == "EMPTY_LIST":
+                return "今天没有待办事项哦。"
+            if error == "NOT_FOUND":
+                return "找不到要删除的待办事项，请检查序号或关键词。"
+            return "删除失败，请重试。"
         return "处理完成。"
 
     async def _service_check(self, platform: str, user_id: str, date_text: str = ""):
@@ -665,6 +674,24 @@ class TodoPalPlugin(Star):
             "message": self._service_message("fix", True, index=index)
         }
 
+    async def _service_delete(self, platform: str, user_id: str, selector: str, date_text: str = ""):
+        target_date = self._resolve_date_input(date_text)
+        todos = self.storage.load_todos(platform, user_id, target_date)
+        if not todos:
+            return {"ok": False, "action": "delete", "date": target_date, "error": "EMPTY_LIST", "message": self._service_message("delete", False, "EMPTY_LIST")}
+        matched_indices = TodoMatcher.match_todos(todos, selector or "")
+        if not matched_indices:
+            return {"ok": False, "action": "delete", "date": target_date, "error": "NOT_FOUND", "message": self._service_message("delete", False, "NOT_FOUND")}
+        deleted = self.storage.delete_todos(platform, user_id, target_date, matched_indices)
+        return {
+            "ok": True,
+            "action": "delete",
+            "date": target_date,
+            "deleted_count": len(deleted),
+            "deleted_items": deleted,
+            "message": self._service_message("delete", True, deleted_count=len(deleted))
+        }
+
     def _tool_text_response(self, action: str, result: dict) -> str:
         if not isinstance(result, dict):
             return "处理完成。"
@@ -694,6 +721,8 @@ class TodoPalPlugin(Star):
         if action == "done":
             return result.get("message", "处理完成。")
         if action == "fix":
+            return result.get("message", "处理完成。")
+        if action == "delete":
             return result.get("message", "处理完成。")
         return result.get("message", "处理完成。")
 
@@ -746,22 +775,36 @@ class TodoPalPlugin(Star):
         result = await self._service_fix(platform, user_id, index, content, date)
         yield event.plain_result(self._tool_text_response("fix", result))
 
-    @filter.regex(r"^(todo|add|done|fix|check)\s*.*")
+    @filter.llm_tool(name="todo_delete")
+    async def todo_tool_delete(self, event: AstrMessageEvent, selector: str, date: str = ""):
+        '''删除待办事项。
+
+        Args:
+            selector(string): 序号、序号列表或内容关键词
+            date(string): 可选日期，不传默认今天
+        '''
+        platform, user_id = self._event_scope(event)
+        result = await self._service_delete(platform, user_id, selector, date)
+        yield event.plain_result(self._tool_text_response("delete", result))
+
+    @filter.regex(r"^(todo|add|done|fix|check|del|delete|rm)\s*.*")
     async def todo_parse(self, event: AstrMessageEvent):
         """
         Parse todo items from user input.
         Supports:
-        1. Explicit commands: 'todo', 'add', 'done', 'fix', 'check'
+        1. Explicit commands: 'todo', 'add', 'done', 'fix', 'check', 'del', 'delete', 'rm'
         2. Natural language with keywords (defined in triggers.json)
         """
         message_str = event.message_str.strip()
         if not message_str:
             return
 
-        explicit_match = re.match(r"^(todo|add|done|fix|check)\s*(.*)", message_str, re.IGNORECASE)
+        explicit_match = re.match(r"^(todo|add|done|fix|check|del|delete|rm)\s*(.*)", message_str, re.IGNORECASE)
         if not explicit_match:
             return
         command_prefix = explicit_match.group(1).lower()
+        if command_prefix in ("del", "delete", "rm"):
+            command_prefix = "delete"
         todo_content = explicit_match.group(2).strip()
 
         user_id = event.get_sender_id()
@@ -789,6 +832,11 @@ class TodoPalPlugin(Star):
 
         if command_prefix == 'fix':
             async for result in self._handle_fix_command(event, platform, user_id, todo_content):
+                yield result
+            return
+
+        if command_prefix == 'delete':
+            async for result in self._handle_delete_command(event, platform, user_id, todo_content):
                 yield result
             return
 
@@ -822,6 +870,13 @@ class TodoPalPlugin(Star):
                     yield await self._reply_with_persona(event, "需要指定修改哪一项及新内容哦。")
                     return
                 async for result in self._handle_fix_command(event, platform, user_id, str(payload)):
+                    yield result
+                return
+            elif intent_type == 'delete':
+                if not payload:
+                    yield await self._reply_with_persona(event, "需要指定删除哪一项哦。")
+                    return
+                async for result in self._handle_delete_command(event, platform, user_id, str(payload)):
                     yield result
                 return
             elif intent_type == 'add':
@@ -1004,3 +1059,16 @@ class TodoPalPlugin(Star):
             yield await self._reply_with_persona(event, f"{result.get('message', f'已修改第 {idx} 条待办。')}\n\n{preview}")
         else:
             yield await self._reply_with_persona(event, "修改失败，请重试。")
+
+    async def _handle_delete_command(self, event: AstrMessageEvent, platform: str, user_id: str, content: str):
+        result = await self._service_delete(platform, user_id, content, "")
+        if not result.get("ok"):
+            yield await self._reply_with_persona(event, result.get("message", "删除失败，请重试。"))
+            return
+        today = datetime.now().strftime("%Y-%m-%d")
+        fresh_todos = self.storage.load_todos(platform, user_id, today)
+        if not fresh_todos:
+            yield await self._reply_with_persona(event, f"{result.get('message', '已删除待办。')}\n\n今天已没有待办事项。")
+            return
+        preview = self._format_preview(fresh_todos, include_confirm_prompt=False)
+        yield await self._reply_with_persona(event, f"{result.get('message', '已删除待办。')}\n\n{preview}")

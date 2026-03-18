@@ -70,11 +70,12 @@ async def analyze_intent(context: Context, provider_id: str, text: str, current_
     """
     Analyze user intent using LLM.
     Returns a dict with:
-    - type: 'add' | 'done' | 'fix' | 'check' | 'cancel' | 'unknown'
+    - type: 'add' | 'done' | 'fix' | 'delete' | 'check' | 'cancel' | 'unknown'
     - payload: varies by type
       - add: list of todo items (dicts)
       - done: list of indices (1-based) or content strings
       - fix: {'index': int, 'content': str}
+      - delete: list of indices (1-based) or content strings
       - check: {'date': 'YYYY-MM-DD'} or null
     """
     if not text.strip():
@@ -103,6 +104,7 @@ async def analyze_intent(context: Context, provider_id: str, text: str, current_
 - "add": 添加新的待办事项。
 - "done": 完成待办事项。
 - "fix": 修改待办事项的内容。
+- "delete": 删除待办事项。
 - "check": 查看待办事项。
 - "cancel": 取消操作或无意义输入。
 
@@ -133,6 +135,12 @@ async def analyze_intent(context: Context, provider_id: str, text: str, current_
 {{
     "type": "check",
     "payload": {{"date": "{today_str}"}}
+}}
+
+5. 删除事项 ("删掉第2项" 或 "删除买牛奶"):
+{{
+    "type": "delete",
+    "payload": "2"  // 如果是数字，直接返回数字字符串；如果是内容匹配，返回内容字符串
 }}
 
 要求：

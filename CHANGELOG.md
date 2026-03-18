@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.8.0] - 2026-03-18
+
+### Added
+- 新增删除能力：支持 `del`、`delete`、`rm` 显式命令按序号或关键词删除待办。
+- 新增 `todo_delete` LLM Tool，支持主系统在自然对话中调用删除能力。
+- 新增删除服务与存储实现，统一返回 `deleted_count`、`deleted_items` 与标准 `message`。
+
+### Changed
+- 扩展 `todo` 智能意图，新增 `delete` 类型解析与执行分支。
+
 ## [1.7.1] - 2026-03-18
 
 ### Changed

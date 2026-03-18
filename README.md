@@ -5,15 +5,16 @@ TodoPal 是一个面向 AstrBot 的待办管理插件，当前版本采用“能
 ## 当前架构
 
 ### 1) 命令入口层（显式前缀）
-- 仅拦截以下前缀：`todo`、`add`、`done`、`fix`、`check`
+- 仅拦截以下前缀：`todo`、`add`、`done`、`fix`、`check`、`del/delete/rm`
 - 避免全量消息拦截带来的系统对话割裂问题
-- `todo` 作为智能入口，会先做意图识别（add/done/fix/check/cancel）
+- `todo` 作为智能入口，会先做意图识别（add/done/fix/delete/check/cancel）
 
 ### 2) 服务能力层（统一业务语义）
 - `check`：读取指定日期待办
 - `add`：解析并生成待办项（支持仅解析不落库）
 - `done`：按序号或内容匹配完成待办
 - `fix`：按序号修改待办内容
+- `delete`：按序号或内容匹配删除待办
 - 每个服务结果都返回统一结构：`ok / action / error / message / data`
 
 ### 3) 工具暴露层（LLM Tool）
@@ -21,6 +22,7 @@ TodoPal 是一个面向 AstrBot 的待办管理插件，当前版本采用“能
 - `todo_add`
 - `todo_done`
 - `todo_fix`
+- `todo_delete`
 - 主系统可在自然对话中调用工具，插件负责提供结构化能力结果
 
 ### 4) 存储层（本地 JSON）
@@ -34,6 +36,7 @@ TodoPal 是一个面向 AstrBot 的待办管理插件，当前版本采用“能
 - `add <自然语言>`：新增待办（先预览，回复“确认”后保存）
 - `done <序号或内容>`：标记完成（支持批量）
 - `fix <序号> <新内容>`：修改待办
+- `del/delete/rm <序号或内容>`：删除待办（支持批量）
 - `check [今天|明天|后天|YYYY-MM-DD|M月D日]`：查看待办
 
 ### 交互确认
@@ -57,6 +60,10 @@ TodoPal 是一个面向 AstrBot 的待办管理插件，当前版本采用“能
 ### `todo_fix(index, content, date="")`
 - 输入：待办序号与新内容
 - 输出：更新项详情与统一 `message`
+
+### `todo_delete(selector, date="")`
+- 输入：序号/关键词选择器
+- 输出：删除数量、删除项详情与统一 `message`
 
 ## 日期与人格
 
