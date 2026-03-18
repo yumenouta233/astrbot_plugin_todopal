@@ -665,6 +665,38 @@ class TodoPalPlugin(Star):
             "message": self._service_message("fix", True, index=index)
         }
 
+    def _tool_text_response(self, action: str, result: dict) -> str:
+        if not isinstance(result, dict):
+            return "处理完成。"
+        if action == "check":
+            if not result.get("ok"):
+                return result.get("message", "获取待办失败，请重试。")
+            items = result.get("items", []) or []
+            date_text = result.get("date", "今天")
+            if not items:
+                return f"{date_text} 暂无待办。"
+            lines = [f"{date_text} 待办共 {len(items)} 项："]
+            for item in items[:12]:
+                idx = item.get("index", 0)
+                status = item.get("status", "pending")
+                mark = "✅ " if status == "done" else ""
+                tm = item.get("time")
+                prefix = f"{tm} " if tm else ""
+                content = item.get("content", "")
+                lines.append(f"{idx}. {mark}{prefix}{content}")
+            if len(items) > 12:
+                lines.append(f"……其余 {len(items) - 12} 项请使用 check 查看完整清单。")
+            return "\n".join(lines)
+        if action == "add":
+            if not result.get("ok"):
+                return result.get("message", "新增失败，请重试。")
+            return result.get("message", f"已新增 {result.get('added_count', 0)} 项待办。")
+        if action == "done":
+            return result.get("message", "处理完成。")
+        if action == "fix":
+            return result.get("message", "处理完成。")
+        return result.get("message", "处理完成。")
+
     @filter.llm_tool(name="todo_check")
     async def todo_tool_check(self, event: AstrMessageEvent, date: str = ""):
         '''查询待办清单。
@@ -674,7 +706,7 @@ class TodoPalPlugin(Star):
         '''
         platform, user_id = self._event_scope(event)
         result = await self._service_check(platform, user_id, date)
-        yield event.plain_result(json.dumps(result, ensure_ascii=False))
+        yield event.plain_result(self._tool_text_response("check", result))
 
     @filter.llm_tool(name="todo_add")
     async def todo_tool_add(self, event: AstrMessageEvent, content: str, date: str = "", time: str = ""):
@@ -687,7 +719,7 @@ class TodoPalPlugin(Star):
         '''
         platform, user_id = self._event_scope(event)
         result = await self._service_add(event, platform, user_id, content, date, time)
-        yield event.plain_result(json.dumps(result, ensure_ascii=False))
+        yield event.plain_result(self._tool_text_response("add", result))
 
     @filter.llm_tool(name="todo_done")
     async def todo_tool_done(self, event: AstrMessageEvent, selector: str, date: str = ""):
@@ -699,7 +731,7 @@ class TodoPalPlugin(Star):
         '''
         platform, user_id = self._event_scope(event)
         result = await self._service_done(platform, user_id, selector, date)
-        yield event.plain_result(json.dumps(result, ensure_ascii=False))
+        yield event.plain_result(self._tool_text_response("done", result))
 
     @filter.llm_tool(name="todo_fix")
     async def todo_tool_fix(self, event: AstrMessageEvent, index: int, content: str, date: str = ""):
@@ -712,7 +744,22 @@ class TodoPalPlugin(Star):
         '''
         platform, user_id = self._event_scope(event)
         result = await self._service_fix(platform, user_id, index, content, date)
-        yield event.plain_result(json.dumps(result, ensure_ascii=False))
+        yield event.plain_result(self._tool_text_response("fix", result))
+
+    @filter.regex(r"^(?:我)?(今天|明天|后天).*(待办|安排|计划|做什么).*$")
+    async def todo_nl_check(self, event: AstrMessageEvent):
+        message_str = (event.message_str or "").strip()
+        if not message_str:
+            return
+        user_id = event.get_sender_id()
+        try:
+            platform = event.unified_msg_origin.split(":")[0]
+        except (AttributeError, IndexError):
+            platform = "unknown"
+        provider_id_for_user = await self._get_provider_id_from_origin(event.unified_msg_origin)
+        self.storage.register_user(platform, user_id, event.unified_msg_origin, provider_id_for_user)
+        async for result in self._handle_check_command(event, platform, user_id, message_str, None):
+            yield result
 
     @filter.regex(r"^(todo|add|done|fix|check)\s*.*")
     async def todo_parse(self, event: AstrMessageEvent):
