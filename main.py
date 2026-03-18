@@ -682,7 +682,21 @@ class TodoPalPlugin(Star):
         matched_indices = TodoMatcher.match_todos(todos, selector or "")
         if not matched_indices:
             return {"ok": False, "action": "delete", "date": target_date, "error": "NOT_FOUND", "message": self._service_message("delete", False, "NOT_FOUND")}
-        deleted = self.storage.delete_todos(platform, user_id, target_date, matched_indices)
+        delete_method = getattr(self.storage, "delete_todos", None)
+        if callable(delete_method):
+            deleted = delete_method(platform, user_id, target_date, matched_indices)
+        else:
+            valid_indices = sorted({idx for idx in matched_indices if 0 <= idx < len(todos)}, reverse=True)
+            deleted = []
+            for idx in valid_indices:
+                item = dict(todos[idx])
+                item["index"] = idx + 1
+                deleted.append(item)
+                todos.pop(idx)
+            self.storage.save_todos(platform, user_id, target_date, todos)
+            deleted.reverse()
+        if not deleted:
+            return {"ok": False, "action": "delete", "date": target_date, "error": "NOT_FOUND", "message": self._service_message("delete", False, "NOT_FOUND")}
         return {
             "ok": True,
             "action": "delete",
