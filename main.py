@@ -22,7 +22,7 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.8.2")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.9.0")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
@@ -48,6 +48,7 @@ class TodoPalPlugin(Star):
         
         # Start cron loop for proactive messaging
         self._cron_task = asyncio.create_task(self._cron_loop())
+        self._scheduler_bootstrap_task = asyncio.create_task(self._bootstrap_scheduler_sync())
         self._last_rollover_date = ""
         self._last_summary_sent = {}
 
@@ -57,6 +58,13 @@ class TodoPalPlugin(Star):
             task.cancel()
             try:
                 await task
+            except asyncio.CancelledError:
+                pass
+        scheduler_task = getattr(self, "_scheduler_bootstrap_task", None)
+        if scheduler_task and not scheduler_task.done():
+            scheduler_task.cancel()
+            try:
+                await scheduler_task
             except asyncio.CancelledError:
                 pass
 
@@ -103,6 +111,214 @@ class TodoPalPlugin(Star):
                 return await self.context.get_current_chat_provider_id(origin)
             except Exception:
                 return None
+
+    async def _call_maybe_async(self, func, *args, **kwargs):
+        result = func(*args, **kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    def _system_scheduler_enabled(self) -> bool:
+        return bool(self.config.get("use_system_scheduler_for_reminder", True))
+
+    def _get_future_task_methods(self):
+        create_method = getattr(self.context, "create_future_task", None)
+        delete_method = getattr(self.context, "delete_future_task", None)
+        list_method = getattr(self.context, "list_future_tasks", None)
+        return create_method, delete_method, list_method
+
+    def _future_task_available(self) -> bool:
+        if not self._system_scheduler_enabled():
+            return False
+        create_method, delete_method, _ = self._get_future_task_methods()
+        return callable(create_method) and callable(delete_method)
+
+    def _build_reminder_task_name(self, platform: str, user_id: str) -> str:
+        return f"todopal_reminder_{platform}_{user_id}"
+
+    def _build_reminder_signature(self, interval_minutes: int, start: str, end: str, origin: str) -> str:
+        return f"{interval_minutes}|{start}|{end}|{origin}"
+
+    @staticmethod
+    def _build_cron_expression(interval_minutes: int) -> str:
+        minutes = max(1, int(interval_minutes))
+        if minutes < 60:
+            return f"*/{minutes} * * * *"
+        if minutes % 60 == 0:
+            hours = max(1, minutes // 60)
+            return f"0 */{hours} * * *"
+        return f"*/{minutes} * * * *"
+
+    @staticmethod
+    def _extract_task_entries(raw) -> list:
+        if isinstance(raw, list):
+            return raw
+        if isinstance(raw, dict):
+            for key in ("tasks", "items", "data", "result"):
+                value = raw.get(key)
+                if isinstance(value, list):
+                    return value
+            return [raw]
+        return []
+
+    @staticmethod
+    def _task_id(task) -> str:
+        if isinstance(task, dict):
+            for key in ("task_id", "id", "uuid"):
+                value = task.get(key)
+                if isinstance(value, str) and value:
+                    return value
+        return ""
+
+    @staticmethod
+    def _task_name(task) -> str:
+        if isinstance(task, dict):
+            value = task.get("name")
+            if isinstance(value, str):
+                return value
+        return ""
+
+    def _build_future_task_note(self, platform: str, user_id: str, start: str, end: str) -> str:
+        return (
+            "你是 TodoPal 的未来提醒执行器。"
+            f"目标用户平台={platform}，用户ID={user_id}。"
+            f"仅在时间窗口 {start}-{end} 内执行提醒。"
+            "先调用 todo_check(date='今天')，如果存在未完成待办，再发送简短提醒。"
+            "如果没有未完成待办，不发送任何消息。"
+        )
+
+    async def _list_future_tasks(self):
+        _, _, list_method = self._get_future_task_methods()
+        if not callable(list_method):
+            return []
+        try:
+            result = await self._call_maybe_async(list_method)
+            return self._extract_task_entries(result)
+        except TypeError:
+            try:
+                result = await self._call_maybe_async(list_method, {})
+                return self._extract_task_entries(result)
+            except Exception:
+                return []
+        except Exception:
+            return []
+
+    async def _delete_future_task_by_id(self, task_id: str) -> bool:
+        if not task_id:
+            return False
+        _, delete_method, _ = self._get_future_task_methods()
+        if not callable(delete_method):
+            return False
+        attempts = [
+            {"task_id": task_id},
+            {"id": task_id},
+            {"task_uuid": task_id}
+        ]
+        for payload in attempts:
+            try:
+                await self._call_maybe_async(delete_method, **payload)
+                return True
+            except TypeError:
+                continue
+            except Exception:
+                continue
+        try:
+            await self._call_maybe_async(delete_method, task_id)
+            return True
+        except Exception:
+            return False
+
+    async def _create_future_task(self, name: str, note: str, cron_expression: str):
+        create_method, _, _ = self._get_future_task_methods()
+        if not callable(create_method):
+            return None
+        attempts = [
+            {"name": name, "note": note, "cron_expression": cron_expression, "run_once": False},
+            {"name": name, "note": note, "cron_expression": cron_expression},
+            {"name": name, "note": note, "cron": cron_expression},
+            {"task_name": name, "note": note, "cron_expression": cron_expression, "run_once": False}
+        ]
+        for payload in attempts:
+            try:
+                return await self._call_maybe_async(create_method, **payload)
+            except TypeError:
+                continue
+            except Exception:
+                continue
+        return None
+
+    async def _sync_user_reminder_task(self, platform: str, user_id: str, origin: str):
+        if not platform or not user_id:
+            return
+        if not self._future_task_available():
+            return
+        user_info = self.storage.get_user_info(platform, user_id)
+        interval_minutes = self._resolve_reminder_interval_minutes(self.config)
+        start = self._normalize_hhmm(self.config.get("reminder_start", "09:00"), "09:00")
+        end = self._normalize_hhmm(self.config.get("reminder_end", "22:00"), "22:00")
+        enabled = bool(self.config.get("reminder_enable", False))
+        task_name = self._build_reminder_task_name(platform, user_id)
+        stored_task_id = str(user_info.get("reminder_task_id", "") or "")
+        stored_signature = str(user_info.get("reminder_signature", "") or "")
+        new_signature = self._build_reminder_signature(interval_minutes, start, end, origin or "")
+        if not enabled:
+            if stored_task_id:
+                await self._delete_future_task_by_id(stored_task_id)
+            self.storage.update_user_info(platform, user_id, {
+                "reminder_task_id": "",
+                "reminder_task_name": task_name,
+                "reminder_signature": "",
+                "reminder_scheduler": "system_disabled"
+            })
+            return
+        if stored_task_id and stored_signature == new_signature:
+            self.storage.update_user_info(platform, user_id, {
+                "reminder_task_name": task_name,
+                "reminder_scheduler": "system"
+            })
+            return
+        if stored_task_id:
+            await self._delete_future_task_by_id(stored_task_id)
+        existing_tasks = await self._list_future_tasks()
+        for task in existing_tasks:
+            if self._task_name(task) == task_name:
+                task_id = self._task_id(task)
+                if task_id:
+                    await self._delete_future_task_by_id(task_id)
+        cron_expression = self._build_cron_expression(interval_minutes)
+        note = self._build_future_task_note(platform, user_id, start, end)
+        created = await self._create_future_task(task_name, note, cron_expression)
+        created_id = self._task_id(created)
+        self.storage.update_user_info(platform, user_id, {
+            "reminder_task_id": created_id,
+            "reminder_task_name": task_name,
+            "reminder_signature": new_signature,
+            "reminder_scheduler": "system" if created_id else "system_failed"
+        })
+
+    async def _sync_all_users_reminder_tasks(self):
+        if not self._future_task_available():
+            return
+        users = self.storage.get_all_users()
+        for user in users:
+            platform = user.get("platform")
+            user_id = user.get("user_id")
+            origin = user.get("origin", "")
+            if not platform or not user_id:
+                continue
+            try:
+                await self._sync_user_reminder_task(platform, user_id, origin)
+            except Exception as e:
+                logger.error(f"Reminder task sync failed for {platform}/{user_id}: {e}")
+
+    async def _bootstrap_scheduler_sync(self):
+        try:
+            await asyncio.sleep(2)
+            await self._sync_all_users_reminder_tasks()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Scheduler bootstrap sync failed: {e}")
 
     async def _send_text_to_origin(self, origin: str, text: str) -> bool:
         if not origin or not text:
@@ -423,7 +639,7 @@ class TodoPalPlugin(Star):
                             if sent:
                                 self._last_summary_sent[user_key] = today_str
                     
-                    if self.config.get("reminder_enable", False):
+                    if self.config.get("reminder_enable", False) and not self._future_task_available():
                         if reminder_start <= current_time_str <= reminder_end:
                             last_time = last_reminders.get(user_key)
                             if not last_time or (now - last_time).total_seconds() >= reminder_interval_minutes * 60:
@@ -613,6 +829,11 @@ class TodoPalPlugin(Star):
             return
         provider_id = await self._get_provider_id_from_origin(origin)
         self.storage.register_user(platform, user_id, origin, provider_id)
+        if self._future_task_available():
+            try:
+                await self._sync_user_reminder_task(platform, user_id, origin)
+            except Exception as e:
+                logger.error(f"Reminder task sync failed for {platform}/{user_id}: {e}")
 
     def _resolve_date_input(self, date_text: str = "") -> str:
         if not date_text:
@@ -963,8 +1184,8 @@ class TodoPalPlugin(Star):
         except (AttributeError, IndexError):
             platform = "unknown"
 
+        await self._register_event_user_context(event, platform, user_id)
         provider_id_for_user = await self._get_provider_id_from_origin(event.unified_msg_origin)
-        self.storage.register_user(platform, user_id, event.unified_msg_origin, provider_id_for_user)
 
         if command_prefix == 'check':
             async for result in self._handle_check_command(event, platform, user_id, todo_content, None):

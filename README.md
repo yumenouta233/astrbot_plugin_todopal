@@ -34,6 +34,10 @@ TodoPal 是一个面向 AstrBot 的待办管理插件，当前版本采用“能
 - 主动提醒/总结优先走 LLM 生成文案，失败时自动回退到模板文案，不中断发送
 - 发送接口增加兼容调用路径，适配不同 AstrBot 版本下 `send_message` 参数差异
 
+### 6) 提醒调度模式
+- 默认优先接入主系统 `future_task` 托管循环提醒，任务按用户维度自动创建与更新
+- 若主系统调度接口不可用或手动关闭托管模式，则自动回退到插件本地循环提醒
+
 ## 使用方式
 
 ### 显式命令
@@ -110,6 +114,7 @@ data/plugin_data/todopal/
 - 在 WebUI 中按需设置：
   - 人格（`bot_persona` / `bot_persona_prompt`）
   - 主动提醒与总结开关、时间段、间隔
+  - 提醒调度模式（`use_system_scheduler_for_reminder`，默认启用主系统托管）
   - 提醒间隔字段使用 `reminder_interval_minutes`（分钟）
   - 自定义触发词配置（用于兼容旧行为配置）
 - 触发过一次命令或工具调用后，插件会自动刷新用户的 `origin/provider_id` 缓存，降低“有待办但不提醒”的概率

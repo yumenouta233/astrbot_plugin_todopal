@@ -26,6 +26,11 @@
     "description": "开启高频循环提醒",
     "default": false
   },
+  "use_system_scheduler_for_reminder": {
+    "type": "bool",
+    "description": "优先使用主系统 future task 托管提醒（关闭则使用插件本地循环）",
+    "default": true
+  },
   "reminder_interval_minutes": {
     "type": "int",
     "description": "每隔多少分钟提醒一次 (仅当有未完成待办时，最小1分钟)",

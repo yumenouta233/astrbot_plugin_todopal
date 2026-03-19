@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.9.0] - 2026-03-19
+
+### Added
+- 新增提醒调度适配层：支持优先接入主系统 `future_task`（`create_future_task / delete_future_task / list_future_tasks`）托管循环提醒。
+- 新增提醒任务幂等同步机制：按用户维度维护 `reminder_task_id/reminder_task_name/reminder_signature`，配置变更自动重建任务。
+- 新增 `use_system_scheduler_for_reminder` 配置项，可在 WebUI 切换“主系统调度”与“插件本地循环”。
+
+### Changed
+- 命令与工具入口在注册用户上下文后会同步提醒任务，降低“配置改了但任务未更新”问题。
+- 当主系统调度可用时，本地 `cron` 不再执行提醒发送，仅保留本地兜底与其他后台能力。
+
 ## [1.8.2] - 2026-03-19
 
 ### Changed
