@@ -22,7 +22,7 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.8.0")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.8.1")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
@@ -361,15 +361,20 @@ class TodoPalPlugin(Star):
 
                 users = self.storage.get_all_users()
                 for u in users:
-                    platform = u['platform']
-                    user_id = u['user_id']
-                    origin = u['origin']
+                    platform = u.get("platform")
+                    user_id = u.get("user_id")
+                    origin = u.get("origin")
+                    if not platform or not user_id or not origin:
+                        continue
                     cached_provider_id = u.get("provider_id")
                     user_key = f"{platform}_{user_id}"
+                    provider_id = cached_provider_id or await self._get_provider_id_from_origin(origin)
+                    if provider_id and provider_id != cached_provider_id:
+                        self.storage.register_user(platform, user_id, origin, provider_id)
                     
                     if self.config.get("summary_enable", True):
                         if current_time_str >= summary_time and self._last_summary_sent.get(user_key) != today_str:
-                            sent = await self._send_proactive_summary(platform, user_id, origin, today_str, cached_provider_id)
+                            sent = await self._send_proactive_summary(platform, user_id, origin, today_str, provider_id)
                             if sent:
                                 self._last_summary_sent[user_key] = today_str
                     
@@ -377,7 +382,7 @@ class TodoPalPlugin(Star):
                         if reminder_start <= current_time_str <= reminder_end:
                             last_time = last_reminders.get(user_key)
                             if not last_time or (now - last_time).total_seconds() >= reminder_interval_minutes * 60:
-                                sent = await self._send_proactive_reminder(platform, user_id, origin, today_str, cached_provider_id)
+                                sent = await self._send_proactive_reminder(platform, user_id, origin, today_str, provider_id)
                                 if sent:
                                     last_reminders[user_key] = now
                                     
@@ -427,6 +432,7 @@ class TodoPalPlugin(Star):
         logger.debug(f"Proactive summary prompt: {prompt}")
         provider_id = cached_provider_id or await self._get_provider_id_from_origin(origin)
         if not provider_id:
+            logger.debug(f"Summary skipped: provider unavailable for {platform}/{user_id}")
             return False
         
         resp = await self.context.llm_generate(chat_provider_id=provider_id, prompt=prompt)
@@ -457,6 +463,7 @@ class TodoPalPlugin(Star):
         logger.debug(f"Proactive reminder prompt: {prompt}")
         provider_id = cached_provider_id or await self._get_provider_id_from_origin(origin)
         if not provider_id:
+            logger.debug(f"Reminder skipped: provider unavailable for {platform}/{user_id}")
             return False
         
         resp = await self.context.llm_generate(chat_provider_id=provider_id, prompt=prompt)
@@ -544,6 +551,13 @@ class TodoPalPlugin(Star):
         except (AttributeError, IndexError):
             platform = "unknown"
         return platform, user_id
+
+    async def _register_event_user_context(self, event: AstrMessageEvent, platform: str, user_id: str):
+        origin = getattr(event, "unified_msg_origin", "") or ""
+        if not origin:
+            return
+        provider_id = await self._get_provider_id_from_origin(origin)
+        self.storage.register_user(platform, user_id, origin, provider_id)
 
     def _resolve_date_input(self, date_text: str = "") -> str:
         if not date_text:
@@ -810,6 +824,7 @@ class TodoPalPlugin(Star):
             date(string): 日期，可为空，支持今天/明天/后天/YYYY-MM-DD/M月D日
         '''
         platform, user_id = self._event_scope(event)
+        await self._register_event_user_context(event, platform, user_id)
         result = await self._service_check(platform, user_id, date)
         yield event.plain_result(self._tool_text_response("check", result))
 
@@ -823,6 +838,7 @@ class TodoPalPlugin(Star):
             time(string): 可选时间，格式建议HH:MM
         '''
         platform, user_id = self._event_scope(event)
+        await self._register_event_user_context(event, platform, user_id)
         result = await self._service_add(event, platform, user_id, content, date, time)
         yield event.plain_result(self._tool_text_response("add", result))
 
@@ -835,6 +851,7 @@ class TodoPalPlugin(Star):
             date(string): 可选日期，不传默认今天
         '''
         platform, user_id = self._event_scope(event)
+        await self._register_event_user_context(event, platform, user_id)
         result = await self._service_done(platform, user_id, selector, date)
         yield event.plain_result(self._tool_text_response("done", result))
 
@@ -848,6 +865,7 @@ class TodoPalPlugin(Star):
             date(string): 可选日期，不传默认今天
         '''
         platform, user_id = self._event_scope(event)
+        await self._register_event_user_context(event, platform, user_id)
         result = await self._service_fix(platform, user_id, index, content, date)
         yield event.plain_result(self._tool_text_response("fix", result))
 
@@ -860,6 +878,7 @@ class TodoPalPlugin(Star):
             date(string): 可选日期，不传默认今天
         '''
         platform, user_id = self._event_scope(event)
+        await self._register_event_user_context(event, platform, user_id)
         result = await self._service_delete(platform, user_id, selector, date)
         yield event.plain_result(self._tool_text_response("delete", result))
 

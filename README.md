@@ -28,6 +28,7 @@ TodoPal 是一个面向 AstrBot 的待办管理插件，当前版本采用“能
 ### 4) 存储层（本地 JSON）
 - 按 `platform / user / year / month / date` 分层存储
 - 单日文件内维护 `pending/done` 状态、创建时间、更新时间等字段
+- 用户注册信息同时记录 `origin/provider_id`，供主动提醒与主动总结任务复用
 
 ## 使用方式
 
@@ -105,7 +106,9 @@ data/plugin_data/todopal/
 - 在 WebUI 中按需设置：
   - 人格（`bot_persona` / `bot_persona_prompt`）
   - 主动提醒与总结开关、时间段、间隔
+  - 提醒间隔字段使用 `reminder_interval_minutes`（分钟）
   - 自定义触发词配置（用于兼容旧行为配置）
+- 触发过一次命令或工具调用后，插件会自动刷新用户的 `origin/provider_id` 缓存，降低“有待办但不提醒”的概率
 
 ## 安装
 

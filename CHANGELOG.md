@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.8.1] - 2026-03-19
+
+### Changed
+- 主动提醒/总结链路增加运行时 provider 刷新：用户缓存无 provider 时，会基于 origin 重新解析并回写，减少“有待办但不提醒”场景。
+- LLM Tool 路径（`todo_check/todo_add/todo_done/todo_fix/todo_delete`）补齐用户上下文注册，确保工具调用也能刷新 `origin/provider_id`。
+- `cron` 用户扫描增加空字段保护，避免异常用户记录影响整轮提醒任务执行。
+- 主动提醒与总结在 provider 不可用时输出调试日志，便于快速定位未发送原因。
+
 ## [1.8.0] - 2026-03-18
 
 ### Added

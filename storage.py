@@ -97,6 +97,28 @@ class TodoStorage:
         users[key] = existing
         self._save_users_data(users)
 
+    def get_user_info(self, platform: str, user_id: str) -> Dict:
+        users = self._load_users_data()
+        key = f"{platform}_{user_id}"
+        data = users.get(key, {})
+        if isinstance(data, dict):
+            return dict(data)
+        return {}
+
+    def update_user_info(self, platform: str, user_id: str, fields: Dict):
+        users = self._load_users_data()
+        key = f"{platform}_{user_id}"
+        existing = users.get(key, {})
+        if not isinstance(existing, dict):
+            existing = {}
+        existing["platform"] = existing.get("platform", platform)
+        existing["user_id"] = existing.get("user_id", user_id)
+        for k, v in (fields or {}).items():
+            existing[k] = v
+        existing["last_active"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        users[key] = existing
+        self._save_users_data(users)
+
     def _get_file_path(self, platform: str, user_id: str, date_str: str) -> Path:
         """
         Construct the file path for a specific user and date.
