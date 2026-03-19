@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.9.1] - 2026-03-19
+
+### Fixed
+- 修复用户上下文注册会覆盖提醒任务字段的问题，`register_user` 改为增量合并，避免 `reminder_task_id` 在每次对话后被清空。
+- 修复主系统调度判定过早导致本地提醒被误停的问题：仅当用户已成功创建系统提醒任务时才停用本地提醒分支。
+- 修复 future task 返回结构兼容性不足问题：补充嵌套 `task/data/result` 的任务 ID 与名称解析。
+- 修复任务创建易失败但不可观测问题：增加创建尝试日志、返回类型日志与同步结果日志，便于定位参数契约差异。
+
+### Changed
+- 调整 `future_task` 创建参数序列，优先尝试 `task_type=active_agent`。
+- 优化 reminder note 指令模板，明确要求执行时使用 `send_message_to_user` 发送提醒消息。
+
 ## [1.9.0] - 2026-03-19
 
 ### Added

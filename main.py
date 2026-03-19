@@ -22,7 +22,7 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.9.0")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.9.1")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
@@ -133,6 +133,15 @@ class TodoPalPlugin(Star):
         create_method, delete_method, _ = self._get_future_task_methods()
         return callable(create_method) and callable(delete_method)
 
+    def _is_system_scheduler_active_for_user(self, user: dict) -> bool:
+        if not self._future_task_available():
+            return False
+        if not isinstance(user, dict):
+            return False
+        scheduler = str(user.get("reminder_scheduler", "") or "")
+        task_id = str(user.get("reminder_task_id", "") or "")
+        return scheduler == "system" and bool(task_id)
+
     def _build_reminder_task_name(self, platform: str, user_id: str) -> str:
         return f"todopal_reminder_{platform}_{user_id}"
 
@@ -158,6 +167,11 @@ class TodoPalPlugin(Star):
                 value = raw.get(key)
                 if isinstance(value, list):
                     return value
+                if isinstance(value, dict):
+                    nested = value.get("tasks") or value.get("items")
+                    if isinstance(nested, list):
+                        return nested
+                    return [value]
             return [raw]
         return []
 
@@ -168,6 +182,13 @@ class TodoPalPlugin(Star):
                 value = task.get(key)
                 if isinstance(value, str) and value:
                     return value
+            for key in ("task", "data", "result"):
+                nested = task.get(key)
+                if isinstance(nested, dict):
+                    for nested_key in ("task_id", "id", "uuid"):
+                        nested_value = nested.get(nested_key)
+                        if isinstance(nested_value, str) and nested_value:
+                            return nested_value
         return ""
 
     @staticmethod
@@ -176,15 +197,22 @@ class TodoPalPlugin(Star):
             value = task.get("name")
             if isinstance(value, str):
                 return value
+            nested = task.get("task")
+            if isinstance(nested, dict):
+                nested_name = nested.get("name")
+                if isinstance(nested_name, str):
+                    return nested_name
         return ""
 
     def _build_future_task_note(self, platform: str, user_id: str, start: str, end: str) -> str:
         return (
-            "你是 TodoPal 的未来提醒执行器。"
+            "【TodoPal 定时提醒执行指令】"
             f"目标用户平台={platform}，用户ID={user_id}。"
-            f"仅在时间窗口 {start}-{end} 内执行提醒。"
-            "先调用 todo_check(date='今天')，如果存在未完成待办，再发送简短提醒。"
-            "如果没有未完成待办，不发送任何消息。"
+            f"只在 {start}-{end} 时间段执行。"
+            "先调用 todo_check(date='今天') 获取清单。"
+            "如果存在未完成待办，调用 send_message_to_user 发送提醒。"
+            "提醒文案：你今天还有待办未完成，记得处理一下。"
+            "如果没有未完成待办，不发送消息。"
         )
 
     async def _list_future_tasks(self):
@@ -233,17 +261,24 @@ class TodoPalPlugin(Star):
         if not callable(create_method):
             return None
         attempts = [
+            {"name": name, "note": note, "cron_expression": cron_expression, "task_type": "active_agent", "run_once": False},
+            {"name": name, "note": note, "cron_expression": cron_expression, "task_type": "active_agent"},
             {"name": name, "note": note, "cron_expression": cron_expression, "run_once": False},
             {"name": name, "note": note, "cron_expression": cron_expression},
             {"name": name, "note": note, "cron": cron_expression},
-            {"task_name": name, "note": note, "cron_expression": cron_expression, "run_once": False}
+            {"task_name": name, "note": note, "cron_expression": cron_expression, "run_once": False},
+            {"task_name": name, "note": note, "cron_expression": cron_expression, "task_type": "active_agent", "run_once": False}
         ]
         for payload in attempts:
             try:
-                return await self._call_maybe_async(create_method, **payload)
+                logger.info(f"Create future task attempt: name={name}, payload_keys={list(payload.keys())}")
+                result = await self._call_maybe_async(create_method, **payload)
+                logger.info(f"Create future task result type={type(result).__name__}")
+                return result
             except TypeError:
                 continue
-            except Exception:
+            except Exception as e:
+                logger.error(f"Create future task failed for {name}: {e}")
                 continue
         return None
 
@@ -277,24 +312,35 @@ class TodoPalPlugin(Star):
                 "reminder_scheduler": "system"
             })
             return
-        if stored_task_id:
-            await self._delete_future_task_by_id(stored_task_id)
         existing_tasks = await self._list_future_tasks()
+        old_task_ids = set()
+        if stored_task_id:
+            old_task_ids.add(stored_task_id)
         for task in existing_tasks:
             if self._task_name(task) == task_name:
                 task_id = self._task_id(task)
                 if task_id:
-                    await self._delete_future_task_by_id(task_id)
+                    old_task_ids.add(task_id)
         cron_expression = self._build_cron_expression(interval_minutes)
         note = self._build_future_task_note(platform, user_id, start, end)
         created = await self._create_future_task(task_name, note, cron_expression)
         created_id = self._task_id(created)
+        if not created_id and old_task_ids:
+            for old_id in old_task_ids:
+                await self._delete_future_task_by_id(old_id)
+            created = await self._create_future_task(task_name, note, cron_expression)
+            created_id = self._task_id(created)
+        if created_id:
+            for old_id in old_task_ids:
+                if old_id != created_id:
+                    await self._delete_future_task_by_id(old_id)
         self.storage.update_user_info(platform, user_id, {
             "reminder_task_id": created_id,
             "reminder_task_name": task_name,
             "reminder_signature": new_signature,
             "reminder_scheduler": "system" if created_id else "system_failed"
         })
+        logger.info(f"Reminder task sync result: user={platform}/{user_id}, task_id={created_id or 'none'}, scheduler={'system' if created_id else 'local_fallback'}")
 
     async def _sync_all_users_reminder_tasks(self):
         if not self._future_task_available():
@@ -639,7 +685,7 @@ class TodoPalPlugin(Star):
                             if sent:
                                 self._last_summary_sent[user_key] = today_str
                     
-                    if self.config.get("reminder_enable", False) and not self._future_task_available():
+                    if self.config.get("reminder_enable", False) and not self._is_system_scheduler_active_for_user(u):
                         if reminder_start <= current_time_str <= reminder_end:
                             last_time = last_reminders.get(user_key)
                             if not last_time or (now - last_time).total_seconds() >= reminder_interval_minutes * 60:

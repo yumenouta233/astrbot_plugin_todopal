@@ -39,14 +39,16 @@ class TodoStorage:
             users = self._load_users_data()
             key = f"{platform}_{user_id}"
             existing = users.get(key, {})
-            users[key] = {
-                "platform": platform,
-                "user_id": user_id,
-                "origin": origin,
-                "last_active": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "provider_id": provider_id or existing.get("provider_id", ""),
-                "last_rollover_date": existing.get("last_rollover_date", "")
-            }
+            if not isinstance(existing, dict):
+                existing = {}
+            merged = dict(existing)
+            merged["platform"] = platform
+            merged["user_id"] = user_id
+            merged["origin"] = origin
+            merged["last_active"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            merged["provider_id"] = provider_id or existing.get("provider_id", "")
+            merged["last_rollover_date"] = existing.get("last_rollover_date", "")
+            users[key] = merged
             self._save_users_data(users)
         except Exception as e:
             logger.error(f"Failed to register user {user_id}: {e}")
