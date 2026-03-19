@@ -22,7 +22,7 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.8.1")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.8.2")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
@@ -103,6 +103,51 @@ class TodoPalPlugin(Star):
                 return await self.context.get_current_chat_provider_id(origin)
             except Exception:
                 return None
+
+    async def _send_text_to_origin(self, origin: str, text: str) -> bool:
+        if not origin or not text:
+            return False
+        send_method = getattr(self.context, "send_message", None)
+        if not callable(send_method):
+            return False
+        try:
+            await send_method(origin, text)
+            return True
+        except TypeError:
+            try:
+                await send_method(umo=origin, message=text)
+                return True
+            except Exception:
+                pass
+        except Exception:
+            pass
+        try:
+            await send_method(origin, [Plain(text)])
+            return True
+        except TypeError:
+            try:
+                await send_method(umo=origin, message=[Plain(text)])
+                return True
+            except Exception:
+                return False
+        except Exception:
+            return False
+        return False
+
+    @staticmethod
+    def _build_fallback_summary_text(todos: list, completed: list, pending: list) -> str:
+        total = len(todos)
+        done_count = len(completed)
+        pending_count = len(pending)
+        return f"今日待办总结：共{total}项，已完成{done_count}项，未完成{pending_count}项。"
+
+    @staticmethod
+    def _build_fallback_reminder_text(pending: list) -> str:
+        top_items = [str(t.get("content", "")).strip() for t in pending if str(t.get("content", "")).strip()]
+        top_items = top_items[:3]
+        if not top_items:
+            return "你还有未完成的待办，记得处理一下。"
+        return f"你还有{len(pending)}项待办未完成：{'；'.join(top_items)}。"
 
     @staticmethod
     def _persona_text_from_data(persona_data):
@@ -431,16 +476,21 @@ class TodoPalPlugin(Star):
 """
         logger.debug(f"Proactive summary prompt: {prompt}")
         provider_id = cached_provider_id or await self._get_provider_id_from_origin(origin)
-        if not provider_id:
-            logger.debug(f"Summary skipped: provider unavailable for {platform}/{user_id}")
-            return False
-        
-        resp = await self.context.llm_generate(chat_provider_id=provider_id, prompt=prompt)
-        if resp and hasattr(resp, 'completion_text'):
-            msg = resp.completion_text
-            await self.context.send_message(origin, msg)
-            return True
-        return False
+        if provider_id:
+            try:
+                resp = await self.context.llm_generate(chat_provider_id=provider_id, prompt=prompt)
+                if resp and hasattr(resp, 'completion_text') and resp.completion_text:
+                    msg = resp.completion_text.strip()
+                    if msg:
+                        sent = await self._send_text_to_origin(origin, msg)
+                        if sent:
+                            return True
+            except Exception as e:
+                logger.error(f"Proactive summary llm failed for {platform}/{user_id}: {e}")
+        else:
+            logger.debug(f"Summary provider unavailable for {platform}/{user_id}, fallback to template")
+        fallback_text = self._build_fallback_summary_text(todos, completed, pending)
+        return await self._send_text_to_origin(origin, fallback_text)
 
     async def _send_proactive_reminder(self, platform, user_id, origin, today_str, cached_provider_id=None) -> bool:
         todos = self.storage.load_todos(platform, user_id, today_str)
@@ -462,16 +512,21 @@ class TodoPalPlugin(Star):
 """
         logger.debug(f"Proactive reminder prompt: {prompt}")
         provider_id = cached_provider_id or await self._get_provider_id_from_origin(origin)
-        if not provider_id:
-            logger.debug(f"Reminder skipped: provider unavailable for {platform}/{user_id}")
-            return False
-        
-        resp = await self.context.llm_generate(chat_provider_id=provider_id, prompt=prompt)
-        if resp and hasattr(resp, 'completion_text'):
-            msg = resp.completion_text
-            await self.context.send_message(origin, msg)
-            return True
-        return False
+        if provider_id:
+            try:
+                resp = await self.context.llm_generate(chat_provider_id=provider_id, prompt=prompt)
+                if resp and hasattr(resp, 'completion_text') and resp.completion_text:
+                    msg = resp.completion_text.strip()
+                    if msg:
+                        sent = await self._send_text_to_origin(origin, msg)
+                        if sent:
+                            return True
+            except Exception as e:
+                logger.error(f"Proactive reminder llm failed for {platform}/{user_id}: {e}")
+        else:
+            logger.debug(f"Reminder provider unavailable for {platform}/{user_id}, fallback to template")
+        fallback_text = self._build_fallback_reminder_text(pending)
+        return await self._send_text_to_origin(origin, fallback_text)
 
     async def _reply_with_persona(self, event, plain_text: str):
         """Helper to reply with persona if configured, otherwise plain text."""
