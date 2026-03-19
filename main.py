@@ -51,6 +51,15 @@ class TodoPalPlugin(Star):
         self._last_rollover_date = ""
         self._last_summary_sent = {}
 
+    async def terminate(self):
+        task = getattr(self, "_cron_task", None)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
     @staticmethod
     def _normalize_hhmm(value: str, default: str) -> str:
         try:
@@ -364,9 +373,16 @@ class TodoPalPlugin(Star):
         yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         users = self.storage.get_all_users()
         for u in users:
-            rolled = self.storage.rollover_pending_todos(u['platform'], u['user_id'], yesterday_str, today_str)
+            platform = u.get('platform')
+            user_id = u.get('user_id')
+            if not platform or not user_id:
+                continue
+            if self.storage.get_user_rollover_date(platform, user_id) == today_str:
+                continue
+            rolled = self.storage.rollover_pending_todos(platform, user_id, yesterday_str, today_str)
+            self.storage.set_user_rollover_date(platform, user_id, today_str)
             if rolled > 0:
-                logger.info(f"Rolled over {rolled} items for {u['user_id']}")
+                logger.info(f"Rolled over {rolled} items for {user_id}")
 
     async def _send_proactive_summary(self, platform, user_id, origin, today_str, cached_provider_id=None) -> bool:
         todos = self.storage.load_todos(platform, user_id, today_str)

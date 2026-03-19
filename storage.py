@@ -36,9 +36,7 @@ class TodoStorage:
     def register_user(self, platform: str, user_id: str, origin: str, provider_id: Optional[str] = None):
         """Register or update a user's unified message origin for proactive messaging."""
         try:
-            with open(self.users_file, 'r', encoding='utf-8') as f:
-                users = json.load(f)
-            
+            users = self._load_users_data()
             key = f"{platform}_{user_id}"
             existing = users.get(key, {})
             users[key] = {
@@ -46,23 +44,58 @@ class TodoStorage:
                 "user_id": user_id,
                 "origin": origin,
                 "last_active": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "provider_id": provider_id or existing.get("provider_id", "")
+                "provider_id": provider_id or existing.get("provider_id", ""),
+                "last_rollover_date": existing.get("last_rollover_date", "")
             }
-            
-            with open(self.users_file, 'w', encoding='utf-8') as f:
-                json.dump(users, f, ensure_ascii=False, indent=2)
+            self._save_users_data(users)
         except Exception as e:
             logger.error(f"Failed to register user {user_id}: {e}")
 
     def get_all_users(self) -> List[Dict]:
         """Get all registered users."""
         try:
-            with open(self.users_file, 'r', encoding='utf-8') as f:
-                users = json.load(f)
+            users = self._load_users_data()
             return list(users.values())
         except Exception as e:
             logger.error(f"Failed to read users: {e}")
             return []
+
+    def _load_users_data(self) -> Dict:
+        try:
+            with open(self.users_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+        return {}
+
+    def _save_users_data(self, users: Dict):
+        with open(self.users_file, 'w', encoding='utf-8') as f:
+            json.dump(users, f, ensure_ascii=False, indent=2)
+
+    def get_user_rollover_date(self, platform: str, user_id: str) -> str:
+        users = self._load_users_data()
+        key = f"{platform}_{user_id}"
+        user = users.get(key, {})
+        if isinstance(user, dict):
+            value = user.get("last_rollover_date", "")
+            if isinstance(value, str):
+                return value
+        return ""
+
+    def set_user_rollover_date(self, platform: str, user_id: str, rollover_date: str):
+        users = self._load_users_data()
+        key = f"{platform}_{user_id}"
+        existing = users.get(key, {})
+        if not isinstance(existing, dict):
+            existing = {}
+        existing["platform"] = existing.get("platform", platform)
+        existing["user_id"] = existing.get("user_id", user_id)
+        existing["last_rollover_date"] = rollover_date
+        existing["last_active"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        users[key] = existing
+        self._save_users_data(users)
 
     def _get_file_path(self, platform: str, user_id: str, date_str: str) -> Path:
         """
