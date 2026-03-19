@@ -26,10 +26,10 @@
     "description": "开启高频循环提醒",
     "default": false
   },
-  "reminder_interval": {
+  "reminder_interval_minutes": {
     "type": "int",
-    "description": "每隔多少小时提醒一次 (仅当有未完成待办时)",
-    "default": 2
+    "description": "每隔多少分钟提醒一次 (仅当有未完成待办时，最小1分钟)",
+    "default": 120
   },
   "reminder_start": {
     "type": "string",

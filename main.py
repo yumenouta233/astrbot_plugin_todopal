@@ -74,6 +74,23 @@ class TodoPalPlugin(Star):
         except Exception:
             return default
 
+    @staticmethod
+    def _resolve_reminder_interval_minutes(config: dict) -> int:
+        raw_minutes = config.get("reminder_interval_minutes", None)
+        if raw_minutes is not None:
+            try:
+                parsed = int(raw_minutes)
+                return parsed if parsed > 0 else 1
+            except Exception:
+                return 1
+        legacy_hours = config.get("reminder_interval", 2)
+        try:
+            parsed_hours = float(legacy_hours)
+            minutes = int(parsed_hours * 60)
+            return minutes if minutes > 0 else 1
+        except Exception:
+            return 120
+
     async def _get_provider_id_from_origin(self, origin: str):
         if not origin:
             return None
@@ -335,6 +352,7 @@ class TodoPalPlugin(Star):
                 summary_time = self._normalize_hhmm(self.config.get("summary_time", "23:00"), "23:00")
                 reminder_start = self._normalize_hhmm(self.config.get("reminder_start", "09:00"), "09:00")
                 reminder_end = self._normalize_hhmm(self.config.get("reminder_end", "22:00"), "22:00")
+                reminder_interval_minutes = self._resolve_reminder_interval_minutes(self.config)
                 
                 if self.config.get("auto_rollover", True):
                     if today_str != self._last_rollover_date:
@@ -358,8 +376,7 @@ class TodoPalPlugin(Star):
                     if self.config.get("reminder_enable", False):
                         if reminder_start <= current_time_str <= reminder_end:
                             last_time = last_reminders.get(user_key)
-                            interval_hours = self.config.get("reminder_interval", 2)
-                            if not last_time or (now - last_time).total_seconds() >= interval_hours * 3600:
+                            if not last_time or (now - last_time).total_seconds() >= reminder_interval_minutes * 60:
                                 sent = await self._send_proactive_reminder(platform, user_id, origin, today_str, cached_provider_id)
                                 if sent:
                                     last_reminders[user_key] = now
