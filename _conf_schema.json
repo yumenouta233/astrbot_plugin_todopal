@@ -26,6 +26,16 @@
     "description": "开启高频循环提醒",
     "default": false
   },
+  "reminder_require_subscription": {
+    "type": "bool",
+    "description": "开启订阅制提醒（仅推送给已订阅用户）",
+    "default": true
+  },
+  "reminder_subscription_default_on": {
+    "type": "bool",
+    "description": "新用户默认订阅提醒（仅在订阅状态未写入时生效）",
+    "default": false
+  },
   "use_system_scheduler_for_reminder": {
     "type": "bool",
     "description": "优先使用主系统 future task 托管提醒（关闭则使用插件本地循环）",

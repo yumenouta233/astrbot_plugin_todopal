@@ -22,7 +22,7 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.10.0")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.10.1")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
@@ -467,6 +467,27 @@ class TodoPalPlugin(Star):
             return "llm"
         return "template"
 
+    def _subscription_required_for_reminder(self) -> bool:
+        return bool(self.config.get("reminder_require_subscription", True))
+
+    def _subscription_default_on(self) -> bool:
+        return bool(self.config.get("reminder_subscription_default_on", False))
+
+    def _is_user_reminder_subscribed(self, user: dict) -> bool:
+        if not self._subscription_required_for_reminder():
+            return True
+        if not isinstance(user, dict):
+            return False
+        subscribed = user.get("reminder_subscribed", None)
+        if subscribed is None:
+            return self._subscription_default_on()
+        return bool(subscribed)
+
+    def _set_user_reminder_subscription(self, platform: str, user_id: str, subscribed: bool):
+        self.storage.update_user_info(platform, user_id, {
+            "reminder_subscribed": bool(subscribed)
+        })
+
     def _render_reminder_template(self, pending: list) -> str:
         top_items = [str(t.get("content", "")).strip() for t in pending if str(t.get("content", "")).strip()]
         top_items = top_items[:3]
@@ -761,7 +782,7 @@ class TodoPalPlugin(Star):
                             if sent:
                                 self._last_summary_sent[user_key] = today_str
                     
-                    if self.config.get("reminder_enable", False) and not self._is_system_scheduler_active_for_user(u):
+                    if self.config.get("reminder_enable", False) and not self._is_system_scheduler_active_for_user(u) and self._is_user_reminder_subscribed(u):
                         if reminder_start <= current_time_str <= reminder_end:
                             last_time = last_reminders.get(user_key)
                             if not last_time or (now - last_time).total_seconds() >= reminder_interval_minutes * 60:
@@ -1412,6 +1433,46 @@ class TodoPalPlugin(Star):
         else:
             lead_text = f"已整理 {todo_count} 项待办，确认后保存。"
         yield event.plain_result(f"{lead_text}\n\n{preview}")
+
+    @filter.regex(r"^(sub|subscribe|订阅提醒|取消提醒|提醒订阅)\s*.*")
+    async def reminder_subscription(self, event: AstrMessageEvent):
+        message_str = event.message_str.strip()
+        if not message_str:
+            return
+        lower_text = message_str.lower()
+        action = ""
+        if message_str.startswith("订阅提醒"):
+            action = "on"
+        elif message_str.startswith("取消提醒"):
+            action = "off"
+        elif message_str.startswith("提醒订阅"):
+            action = "list"
+        else:
+            match = re.match(r"^(sub|subscribe)\s*(.*)$", lower_text, re.IGNORECASE)
+            if not match:
+                return
+            arg = (match.group(2) or "").strip()
+            if arg in ("on", "1", "true", "enable", "start", "开启", "开", "订阅"):
+                action = "on"
+            elif arg in ("off", "0", "false", "disable", "stop", "关闭", "关", "取消"):
+                action = "off"
+            else:
+                action = "list"
+        platform, user_id = self._event_scope(event)
+        await self._register_event_user_context(event, platform, user_id)
+        if action == "on":
+            self._set_user_reminder_subscription(platform, user_id, True)
+            yield event.plain_result("已开启提醒订阅。后续将按配置时间自动推送。")
+            return
+        if action == "off":
+            self._set_user_reminder_subscription(platform, user_id, False)
+            yield event.plain_result("已关闭提醒订阅。")
+            return
+        user = self.storage.get_user_info(platform, user_id)
+        subscribed = self._is_user_reminder_subscribed(user)
+        mode = "订阅制" if self._subscription_required_for_reminder() else "全量推送"
+        status = "已订阅" if subscribed else "未订阅"
+        yield event.plain_result(f"当前提醒模式：{mode}，你的状态：{status}。")
 
     @filter.regex(r"^(确认|取消)$")
     async def handle_confirmation(self, event: AstrMessageEvent):

@@ -35,9 +35,9 @@ TodoPal 是一个面向 AstrBot 的待办管理插件，当前版本采用“能
 - 发送接口增加兼容调用路径，适配不同 AstrBot 版本下 `send_message` 参数差异
 
 ### 6) 提醒调度模式
-- 默认优先接入主系统 `future_task` 托管循环提醒，任务按用户维度自动创建与更新
-- 若主系统调度接口不可用或手动关闭托管模式，则自动回退到插件本地循环提醒
-- 仅在“系统提醒任务创建成功并记录 task_id”后才停用本地提醒，防止系统任务创建失败时提醒完全失效
+- 默认使用插件本地循环执行提醒
+- 支持订阅制提醒：仅推送给已订阅用户
+- 可选接入主系统 `future_task` 托管提醒（需手动开启）
 
 ## 使用方式
 
@@ -48,6 +48,8 @@ TodoPal 是一个面向 AstrBot 的待办管理插件，当前版本采用“能
 - `fix <序号> <新内容>`：修改待办
 - `del/delete/rm <序号或内容>`：删除待办（支持批量）
 - `check [今天|明天|后天|YYYY-MM-DD|M月D日]`：查看待办
+- `sub on/off/list`：提醒订阅开关与状态查询
+- `订阅提醒/取消提醒/提醒订阅`：提醒订阅中文命令
 
 ### 交互确认
 - 当识别到新增待办时，插件会先返回结构化预览
@@ -116,6 +118,8 @@ data/plugin_data/todopal/
   - 人格（`bot_persona` / `bot_persona_prompt`）
   - 主动提醒与总结开关、时间段、间隔
   - 提醒调度模式（`use_system_scheduler_for_reminder`，默认使用插件本地循环）
+  - 提醒订阅制（`reminder_require_subscription`，默认仅推送给已订阅用户）
+  - 新用户默认订阅（`reminder_subscription_default_on`，默认关闭）
   - 提醒间隔字段使用 `reminder_interval_minutes`（分钟）
   - 提醒文案模式（`reminder_text_mode`：`template` 或 `llm`，默认 `template`）
   - 提醒模板（`reminder_template`，可用占位符：`{pending_count}`、`{pending_preview}`、`{top1}`、`{top2}`、`{top3}`）

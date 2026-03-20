@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.10.1] - 2026-03-20
+
+### Added
+- 新增固定订阅制提醒能力：支持 `sub on/off/list` 与 `订阅提醒/取消提醒/提醒订阅` 命令管理个人提醒订阅状态。
+- 新增配置项 `reminder_require_subscription` 与 `reminder_subscription_default_on`，可切换“仅订阅用户推送”或“全量用户推送”。
+
+### Changed
+- 本地循环提醒发送条件增加订阅状态判断，默认仅向已订阅用户推送。
+
 ## [1.10.0] - 2026-03-20
 
 ### Changed
