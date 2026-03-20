@@ -115,8 +115,10 @@ data/plugin_data/todopal/
 - 在 WebUI 中按需设置：
   - 人格（`bot_persona` / `bot_persona_prompt`）
   - 主动提醒与总结开关、时间段、间隔
-  - 提醒调度模式（`use_system_scheduler_for_reminder`，默认启用主系统托管）
+  - 提醒调度模式（`use_system_scheduler_for_reminder`，默认使用插件本地循环）
   - 提醒间隔字段使用 `reminder_interval_minutes`（分钟）
+  - 提醒文案模式（`reminder_text_mode`：`template` 或 `llm`，默认 `template`）
+  - 提醒模板（`reminder_template`，可用占位符：`{pending_count}`、`{pending_preview}`、`{top1}`、`{top2}`、`{top3}`）
   - 自定义触发词配置（用于兼容旧行为配置）
 - 触发过一次命令或工具调用后，插件会自动刷新用户的 `origin/provider_id` 缓存，降低“有待办但不提醒”的概率
 - 若仍未收到提醒，可先用 `check 今天` 刷新用户上下文，再观察 1~2 个提醒周期

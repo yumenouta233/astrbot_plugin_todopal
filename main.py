@@ -22,7 +22,7 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.9.1")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.10.0")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
@@ -119,12 +119,25 @@ class TodoPalPlugin(Star):
         return result
 
     def _system_scheduler_enabled(self) -> bool:
-        return bool(self.config.get("use_system_scheduler_for_reminder", True))
+        return bool(self.config.get("use_system_scheduler_for_reminder", False))
 
     def _get_future_task_methods(self):
         create_method = getattr(self.context, "create_future_task", None)
         delete_method = getattr(self.context, "delete_future_task", None)
         list_method = getattr(self.context, "list_future_tasks", None)
+        if callable(create_method) and callable(delete_method):
+            return create_method, delete_method, list_method
+        tool_executor = self._get_tool_executor()
+        if callable(tool_executor):
+            async def create_proxy(**kwargs):
+                return await self._call_tool_executor(tool_executor, "create_future_task", kwargs)
+
+            async def delete_proxy(**kwargs):
+                return await self._call_tool_executor(tool_executor, "delete_future_task", kwargs)
+
+            async def list_proxy(**kwargs):
+                return await self._call_tool_executor(tool_executor, "list_future_tasks", kwargs)
+            return create_proxy, delete_proxy, list_proxy
         return create_method, delete_method, list_method
 
     def _future_task_available(self) -> bool:
@@ -132,6 +145,42 @@ class TodoPalPlugin(Star):
             return False
         create_method, delete_method, _ = self._get_future_task_methods()
         return callable(create_method) and callable(delete_method)
+
+    def _get_tool_executor(self):
+        candidates = []
+        for name in ("call_tool", "invoke_tool", "execute_tool", "run_tool", "call_func_tool"):
+            method = getattr(self.context, name, None)
+            if callable(method):
+                candidates.append(method)
+        tool_manager = getattr(self.context, "func_tool_manager", None)
+        if tool_manager is not None:
+            for name in ("call_tool", "invoke_tool", "execute_tool", "run_tool", "call_func_tool"):
+                method = getattr(tool_manager, name, None)
+                if callable(method):
+                    candidates.append(method)
+        return candidates[0] if candidates else None
+
+    async def _call_tool_executor(self, executor, tool_name: str, args: dict):
+        payload = args or {}
+        attempts = [
+            ((), {"tool_name": tool_name, "args": payload}),
+            ((), {"name": tool_name, "args": payload}),
+            ((), {"tool_name": tool_name, "params": payload}),
+            ((), {"name": tool_name, "params": payload}),
+            ((tool_name, payload), {}),
+            ((tool_name,), payload),
+            ((tool_name,), {"args": payload}),
+            ((tool_name,), {"params": payload})
+        ]
+        for pos_args, kw_args in attempts:
+            try:
+                return await self._call_maybe_async(executor, *pos_args, **kw_args)
+            except TypeError:
+                continue
+            except Exception as e:
+                logger.error(f"Tool executor failed for {tool_name}: {e}")
+                continue
+        raise RuntimeError(f"tool executor unsupported for {tool_name}")
 
     def _is_system_scheduler_active_for_user(self, user: dict) -> bool:
         if not self._future_task_available():
@@ -360,6 +409,7 @@ class TodoPalPlugin(Star):
     async def _bootstrap_scheduler_sync(self):
         try:
             await asyncio.sleep(2)
+            logger.info(f"TodoPal scheduler mode: {'system' if self._future_task_available() else 'local'}")
             await self._sync_all_users_reminder_tasks()
         except asyncio.CancelledError:
             raise
@@ -410,6 +460,32 @@ class TodoPalPlugin(Star):
         if not top_items:
             return "你还有未完成的待办，记得处理一下。"
         return f"你还有{len(pending)}项待办未完成：{'；'.join(top_items)}。"
+
+    def _resolve_reminder_text_mode(self) -> str:
+        mode = str(self.config.get("reminder_text_mode", "template")).strip().lower()
+        if mode == "llm":
+            return "llm"
+        return "template"
+
+    def _render_reminder_template(self, pending: list) -> str:
+        top_items = [str(t.get("content", "")).strip() for t in pending if str(t.get("content", "")).strip()]
+        top_items = top_items[:3]
+        default_template = "你今天还有{pending_count}项待办未完成：{pending_preview}。"
+        template = str(self.config.get("reminder_template", default_template) or "").strip()
+        if not template:
+            template = default_template
+        pending_preview = "；".join(top_items) if top_items else "记得处理今日待办"
+        values = {
+            "pending_count": str(len(pending)),
+            "pending_preview": pending_preview,
+            "top1": top_items[0] if len(top_items) >= 1 else "",
+            "top2": top_items[1] if len(top_items) >= 2 else "",
+            "top3": top_items[2] if len(top_items) >= 3 else ""
+        }
+        text = template
+        for key, value in values.items():
+            text = text.replace("{" + key + "}", value)
+        return text
 
     @staticmethod
     def _persona_text_from_data(persona_data):
@@ -760,6 +836,9 @@ class TodoPalPlugin(Star):
         
         if not pending:
             return False # Nothing to remind
+        if self._resolve_reminder_text_mode() != "llm":
+            reminder_text = self._render_reminder_template(pending)
+            return await self._send_text_to_origin(origin, reminder_text)
             
         persona = self.config.get("bot_persona", "")
         custom_prompt = self.config.get("bot_persona_prompt", "")
@@ -787,7 +866,7 @@ class TodoPalPlugin(Star):
                 logger.error(f"Proactive reminder llm failed for {platform}/{user_id}: {e}")
         else:
             logger.debug(f"Reminder provider unavailable for {platform}/{user_id}, fallback to template")
-        fallback_text = self._build_fallback_reminder_text(pending)
+        fallback_text = self._render_reminder_template(pending)
         return await self._send_text_to_origin(origin, fallback_text)
 
     async def _reply_with_persona(self, event, plain_text: str):

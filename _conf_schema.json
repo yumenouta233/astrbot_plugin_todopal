@@ -29,7 +29,17 @@
   "use_system_scheduler_for_reminder": {
     "type": "bool",
     "description": "优先使用主系统 future task 托管提醒（关闭则使用插件本地循环）",
-    "default": true
+    "default": false
+  },
+  "reminder_text_mode": {
+    "type": "string",
+    "description": "提醒文案生成模式：template(模板直出)/llm(LLM生成后回退模板)",
+    "default": "template"
+  },
+  "reminder_template": {
+    "type": "string",
+    "description": "提醒模板，支持 {pending_count} {pending_preview} {top1} {top2} {top3}",
+    "default": "你今天还有{pending_count}项待办未完成：{pending_preview}。"
   },
   "reminder_interval_minutes": {
     "type": "int",

@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.10.0] - 2026-03-20
+
+### Changed
+- 提醒默认改为插件本地循环调度：`use_system_scheduler_for_reminder` 默认值调整为 `false`，避免依赖主系统 future task。
+- 新增提醒文案模式配置：`reminder_text_mode`，默认 `template`，可切换为 `llm`。
+- 新增提醒模板配置：`reminder_template`，支持 `{pending_count}`、`{pending_preview}`、`{top1}`、`{top2}`、`{top3}` 占位符。
+- 主动提醒发送链路支持纯模板直出，无需 LLM 也可稳定推送。
+
+## [1.9.2] - 2026-03-19
+
+### Fixed
+- 修复部分环境下 `Context` 未直接暴露 `create_future_task/delete_future_task/list_future_tasks` 时无法创建循环任务的问题。
+- 新增工具执行器兼容层：可通过 `call_tool/invoke_tool/execute_tool/run_tool/call_func_tool` 代理调用系统定时任务工具。
+- 新增调度模式启动日志，明确当前是 `system` 还是 `local` 调度路径，便于快速排查“没有循环任务”问题。
+
 ## [1.9.1] - 2026-03-19
 
 ### Fixed
