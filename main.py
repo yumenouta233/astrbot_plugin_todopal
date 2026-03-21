@@ -22,7 +22,7 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.12.2")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.12.3")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
@@ -672,7 +672,8 @@ class TodoPalPlugin(Star):
                 prefix = self._tag_display_prefix(item.get("tag_name", ""), item.get("tag_id", 0))
                 content = str(item.get("content", ""))
                 start = self._format_minutes_hhmm(row.get("start", 0))
-                lines.append(f"{idx}. ⏰ {start} {prefix}{content}".strip())
+                serial = int(item.get("index", idx) or idx)
+                lines.append(f"{serial}. ⏰ {start} {prefix}{content}".strip())
         if flex_rows:
             lines.append("")
             lines.append("优先任务队列：")
@@ -683,6 +684,7 @@ class TodoPalPlugin(Star):
                 if tag_name != current_tag:
                     lines.append(f"{tag_name}：")
                     current_tag = tag_name
+                serial = int(item.get("index", idx) or idx)
                 prefix = self._tag_display_prefix(item.get("tag_name", ""), item.get("tag_id", 0))
                 content = str(item.get("content", ""))
                 level_text = self._priority_level_text(row.get("priority", 0))
@@ -690,14 +692,14 @@ class TodoPalPlugin(Star):
                     start = self._format_minutes_hhmm(row.get("start", 0))
                     end = self._format_minutes_hhmm(row.get("end", row.get("start", 0)))
                     if show_priority_level:
-                        lines.append(f"{idx}. {prefix}{content}（{start}-{end}，{level_text}）".strip())
+                        lines.append(f"{serial}. {prefix}{content}（{start}-{end}，{level_text}）".strip())
                     else:
-                        lines.append(f"{idx}. {prefix}{content}（{start}-{end}）".strip())
+                        lines.append(f"{serial}. {prefix}{content}（{start}-{end}）".strip())
                 else:
                     if show_priority_level:
-                        lines.append(f"{idx}. {prefix}{content}（{level_text}）".strip())
+                        lines.append(f"{serial}. {prefix}{content}（{level_text}）".strip())
                     else:
-                        lines.append(f"{idx}. {prefix}{content}".strip())
+                        lines.append(f"{serial}. {prefix}{content}".strip())
         if backlog:
             lines.append("")
             lines.append("候补：")
@@ -1655,6 +1657,17 @@ class TodoPalPlugin(Star):
             if error == "NOT_FOUND":
                 return "找不到对应的待办事项，请检查描述或序号是否准确。"
             return "处理失败，请重试。"
+        if action == "undone":
+            if ok:
+                count = kwargs.get("updated_count", 0)
+                if count == 0:
+                    return "所选待办目前不是完成状态，无需撤销。"
+                return f"已撤销完成 {count} 项待办。"
+            if error == "EMPTY_LIST":
+                return "今天没有待办事项哦。"
+            if error == "NOT_FOUND":
+                return "找不到对应的待办事项，请检查描述或序号是否准确。"
+            return "处理失败，请重试。"
         if action == "fix":
             if ok:
                 return f"已修改第 {kwargs.get('index', 0)} 条待办。"
@@ -1749,6 +1762,28 @@ class TodoPalPlugin(Star):
             "message": self._service_message("done", True, updated_count=len(updated))
         }
 
+    async def _service_undone(self, platform: str, user_id: str, selector: str, date_text: str = ""):
+        target_date = self._resolve_date_input(date_text)
+        todos = self.storage.load_todos(platform, user_id, target_date)
+        if not todos:
+            return {"ok": False, "action": "undone", "date": target_date, "error": "EMPTY_LIST", "message": self._service_message("undone", False, "EMPTY_LIST")}
+        matched_indices = TodoMatcher.match_todos(todos, selector or "")
+        if not matched_indices:
+            return {"ok": False, "action": "undone", "date": target_date, "error": "NOT_FOUND", "message": self._service_message("undone", False, "NOT_FOUND")}
+        updated = []
+        for idx in matched_indices:
+            if todos[idx].get("status") == "done":
+                self.storage.update_todo_status(platform, user_id, target_date, idx, "pending")
+                updated.append(idx + 1)
+        return {
+            "ok": True,
+            "action": "undone",
+            "date": target_date,
+            "updated_indices": updated,
+            "updated_count": len(updated),
+            "message": self._service_message("undone", True, updated_count=len(updated))
+        }
+
     async def _service_fix(self, platform: str, user_id: str, index: int, content: str, date_text: str = ""):
         target_date = self._resolve_date_input(date_text)
         todos = self.storage.load_todos(platform, user_id, target_date)
@@ -1841,6 +1876,8 @@ class TodoPalPlugin(Star):
             return result.get("message", f"已新增 {result.get('added_count', 0)} 项待办。")
         if action == "done":
             return result.get("message", "处理完成。")
+        if action == "undone":
+            return result.get("message", "处理完成。")
         if action == "fix":
             return result.get("message", "处理完成。")
         if action == "delete":
@@ -1886,6 +1923,19 @@ class TodoPalPlugin(Star):
         result = await self._service_done(platform, user_id, selector, date)
         yield event.plain_result(self._tool_text_response("done", result))
 
+    @filter.llm_tool(name="todo_undone")
+    async def todo_tool_undone(self, event: AstrMessageEvent, selector: str, date: str = ""):
+        '''撤销待办完成状态。
+
+        Args:
+            selector(string): 序号、序号列表或内容关键词
+            date(string): 可选日期，不传默认今天
+        '''
+        platform, user_id = self._event_scope(event)
+        await self._register_event_user_context(event, platform, user_id)
+        result = await self._service_undone(platform, user_id, selector, date)
+        yield event.plain_result(self._tool_text_response("undone", result))
+
     @filter.llm_tool(name="todo_fix")
     async def todo_tool_fix(self, event: AstrMessageEvent, index: int, content: str, date: str = ""):
         '''修改指定待办内容。
@@ -1913,7 +1963,7 @@ class TodoPalPlugin(Star):
         result = await self._service_delete(platform, user_id, selector, date)
         yield event.plain_result(self._tool_text_response("delete", result))
 
-    @filter.regex(r"^(todo|add|done|fix|check|del|delete|rm)\s*.*")
+    @filter.regex(r"^(todo|add|done|undo|undone|撤销完成|取消完成|取消done|fix|check|del|delete|rm)\s*.*")
     async def todo_parse(self, event: AstrMessageEvent):
         """
         Parse todo items from user input.
@@ -1925,12 +1975,14 @@ class TodoPalPlugin(Star):
         if not message_str:
             return
 
-        explicit_match = re.match(r"^(todo|add|done|fix|check|del|delete|rm)\s*(.*)", message_str, re.IGNORECASE)
+        explicit_match = re.match(r"^(todo|add|done|undo|undone|撤销完成|取消完成|取消done|fix|check|del|delete|rm)\s*(.*)", message_str, re.IGNORECASE)
         if not explicit_match:
             return
         command_prefix = explicit_match.group(1).lower()
         if command_prefix in ("del", "delete", "rm"):
             command_prefix = "delete"
+        if command_prefix in ("undo", "undone", "撤销完成", "取消完成", "取消done"):
+            command_prefix = "undone"
         todo_content = explicit_match.group(2).strip()
 
         user_id = event.get_sender_id()
@@ -1953,6 +2005,10 @@ class TodoPalPlugin(Star):
 
         if command_prefix == 'done':
             async for result in self._handle_done_command(event, platform, user_id, todo_content):
+                yield result
+            return
+        if command_prefix == 'undone':
+            async for result in self._handle_undone_command(event, platform, user_id, todo_content):
                 yield result
             return
 
@@ -1980,6 +2036,11 @@ class TodoPalPlugin(Star):
                 return
             intent_type = intent_result['type']
             payload = intent_result.get('payload')
+            undo_match = re.search(r"(撤销完成|取消完成|undo|undone|取消done)\s*(\d+(?:[\s,，、]+\d+)*)", todo_content, re.IGNORECASE)
+            if undo_match:
+                async for result in self._handle_undone_command(event, platform, user_id, undo_match.group(2).strip()):
+                    yield result
+                return
             if intent_type == 'check':
                 async for result in self._handle_check_command(event, platform, user_id, todo_content, payload):
                     yield result
@@ -2282,6 +2343,19 @@ class TodoPalPlugin(Star):
         preview = self._format_preview(fresh_todos, include_confirm_prompt=False)
         yield event.plain_result(f"{result.get('message', '已更新状态。')}\n\n{preview}")
 
+    async def _handle_undone_command(self, event: AstrMessageEvent, platform: str, user_id: str, content: str):
+        result = await self._service_undone(platform, user_id, content, "")
+        if not result.get("ok"):
+            yield event.plain_result(result.get("message", "处理失败，请重试。"))
+            return
+        if result.get("updated_count", 0) == 0:
+            yield event.plain_result(result.get("message", "所选待办目前不是完成状态。"))
+            return
+        today = datetime.now().strftime("%Y-%m-%d")
+        fresh_todos = self.storage.load_todos(platform, user_id, today)
+        preview = self._format_preview(fresh_todos, include_confirm_prompt=False)
+        yield event.plain_result(f"{result.get('message', '已更新状态。')}\n\n{preview}")
+
     async def _handle_check_command(self, event: AstrMessageEvent, platform: str, user_id: str, query_text: str = "", payload=None):
         view_mode, cleaned_query = self._resolve_check_view_mode(query_text)
         target_date = self._resolve_check_date(cleaned_query, payload)
@@ -2289,6 +2363,7 @@ class TodoPalPlugin(Star):
         todos = []
         for item in service_result.get("items", []):
             todos.append({
+                "index": item.get("index", 0),
                 "date": item.get("date"),
                 "time": item.get("time"),
                 "content": item.get("content"),
