@@ -22,7 +22,7 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.10.6")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.10.7")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
@@ -213,6 +213,12 @@ class TodoPalPlugin(Star):
         result = type("TodoPalMessageResult", (), {})()
         result.chain = [Plain(text)]
         return result
+
+    @staticmethod
+    def _is_unfinished_todo(item: dict) -> bool:
+        if not isinstance(item, dict):
+            return False
+        return str(item.get("status", "pending")) in ("pending", "rolled_over")
 
     async def _send_text_via_tool(self, origin: str, text: str) -> bool:
         plain_message = [{"type": "plain", "text": text}]
@@ -914,7 +920,7 @@ class TodoPalPlugin(Star):
             return False
             
         completed = [t for t in todos if t.get('status') == 'done']
-        pending = [t for t in todos if t.get('status') == 'pending']
+        pending = [t for t in todos if self._is_unfinished_todo(t)]
         
         persona = self.config.get("bot_persona", "")
         custom_prompt = self.config.get("bot_persona_prompt", "")
@@ -951,7 +957,7 @@ class TodoPalPlugin(Star):
 
     async def _send_proactive_reminder(self, platform, user_id, origin, today_str, cached_provider_id=None) -> bool:
         todos = self.storage.load_todos(platform, user_id, today_str)
-        pending = [t for t in todos if t.get('status') == 'pending']
+        pending = [t for t in todos if self._is_unfinished_todo(t)]
         
         if not pending:
             logger.debug(f"Reminder skipped: no pending todos for {platform}/{user_id} on {today_str}")
@@ -1052,8 +1058,8 @@ class TodoPalPlugin(Star):
                 
                 prefix = f"{time} " if time else ""
                 check_mark = "✅ " if status == "done" else ""
-                
-                result_lines.append(f"{i}. {check_mark}{prefix}{content}")
+                rollover_mark = "↪ " if status == "rolled_over" else ""
+                result_lines.append(f"{i}. {check_mark}{rollover_mark}{prefix}{content}")
             result_lines.append("")
         
         if include_confirm_prompt:
@@ -1318,10 +1324,11 @@ class TodoPalPlugin(Star):
                 idx = item.get("index", 0)
                 status = item.get("status", "pending")
                 mark = "✅ " if status == "done" else ""
+                rollover_mark = "↪ " if status == "rolled_over" else ""
                 tm = item.get("time")
                 prefix = f"{tm} " if tm else ""
                 content = item.get("content", "")
-                lines.append(f"{idx}. {mark}{prefix}{content}")
+                lines.append(f"{idx}. {mark}{rollover_mark}{prefix}{content}")
             if len(items) > 12:
                 lines.append(f"……其余 {len(items) - 12} 项请使用 check 查看完整清单。")
             return "\n".join(lines)
@@ -1576,7 +1583,7 @@ class TodoPalPlugin(Star):
             today_str = datetime.now().strftime("%Y-%m-%d")
             user = self.storage.get_user_info(platform, user_id)
             todos = self.storage.load_todos(platform, user_id, today_str)
-            pending = [t for t in todos if t.get("status") == "pending"]
+            pending = [t for t in todos if self._is_unfinished_todo(t)]
             subscribed = self._is_user_reminder_subscribed(user)
             reminder_enable = bool(self.config.get("reminder_enable", False))
             system_scheduler_active = self._is_system_scheduler_active_for_user(user)
