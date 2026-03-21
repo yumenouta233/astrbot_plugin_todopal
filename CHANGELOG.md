@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.6] - 2026-03-21
+
+### Changed
+- 主动发送结果判定收敛为 `send_message_to_user` 返回包含 `Message sent to session` 才视为成功，避免误判。
+- 主动发送新增消息对象兜底：构造带 `chain` 属性的消息结果对象传给 `context.send_message`，兼容不接受纯文本/列表的运行环境。
+- 发送失败时保留最后一次真实错误，不再被统一文案覆盖，提升诊断可读性。
+
 ## [1.10.5] - 2026-03-21
 
 ### Changed

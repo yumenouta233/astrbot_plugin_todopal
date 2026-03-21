@@ -11,6 +11,7 @@ from pathlib import Path
 import asyncio
 import inspect
 from datetime import datetime, timedelta
+from astrbot.api.message_components import Plain
 
 try:
     from .llm_parser import parse_todo, analyze_intent
@@ -21,7 +22,7 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.10.5")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.10.6")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
@@ -199,17 +200,19 @@ class TodoPalPlugin(Star):
             return result
         if isinstance(result, str):
             text = result.strip().lower()
-            if "error" in text or "failed" in text or "permission denied" in text:
-                return False
-            if "message sent to session" in text or "success" in text or "ok" in text:
-                return True
-            return True
+            return "message sent to session" in text
         if isinstance(result, dict):
             for key in ("ok", "success", "succeed"):
                 if key in result:
                     return bool(result.get(key))
             return True
         return True
+
+    @staticmethod
+    def _build_plain_message_result(text: str):
+        result = type("TodoPalMessageResult", (), {})()
+        result.chain = [Plain(text)]
+        return result
 
     async def _send_text_via_tool(self, origin: str, text: str) -> bool:
         plain_message = [{"type": "plain", "text": text}]
@@ -518,7 +521,24 @@ class TodoPalPlugin(Star):
         except Exception as e:
             self._last_send_error = f"send_message(origin,text) error: {e}"
             logger.debug(f"send_text_to_origin attempt1(origin,text) failed: {e}")
-        self._last_send_error = "all send paths exhausted"
+        message_result = self._build_plain_message_result(text)
+        try:
+            await send_method(origin, message_result)
+            return True
+        except TypeError as e:
+            self._last_send_error = f"send_message(origin,message_result) type error: {e}"
+            logger.debug(f"send_text_to_origin attempt3(origin,message_result) type error: {e}")
+            try:
+                await send_method(umo=origin, message=message_result)
+                return True
+            except Exception as e2:
+                self._last_send_error = f"send_message(umo,message=message_result) error: {e2}"
+                logger.debug(f"send_text_to_origin attempt4(umo,message_result) failed: {e2}")
+        except Exception as e:
+            self._last_send_error = f"send_message(origin,message_result) error: {e}"
+            logger.debug(f"send_text_to_origin attempt3(origin,message_result) failed: {e}")
+        if not self._last_send_error:
+            self._last_send_error = "all send paths exhausted"
         logger.error("send_text_to_origin failed: all send paths exhausted")
         return False
 
