@@ -22,7 +22,7 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.10.1")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.10.3")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
@@ -181,6 +181,39 @@ class TodoPalPlugin(Star):
                 logger.error(f"Tool executor failed for {tool_name}: {e}")
                 continue
         raise RuntimeError(f"tool executor unsupported for {tool_name}")
+
+    @staticmethod
+    def _origin_session_id(origin: str) -> str:
+        if not origin:
+            return ""
+        parts = str(origin).split(":")
+        if len(parts) >= 3:
+            return parts[-1]
+        return str(origin)
+
+    async def _send_text_via_tool(self, origin: str, text: str) -> bool:
+        tool_executor = self._get_tool_executor()
+        if not callable(tool_executor):
+            return False
+        plain_message = [{"type": "plain", "text": text}]
+        session_id = self._origin_session_id(origin)
+        payloads = [
+            {"messages": plain_message, "unified_msg_origin": origin},
+            {"messages": plain_message, "session_id": origin},
+            {"messages": plain_message, "session_id": session_id},
+            {"messages": plain_message, "umo": origin},
+            {"messages": plain_message, "session": origin},
+            {"messages": plain_message}
+        ]
+        for payload in payloads:
+            try:
+                result = await self._call_tool_executor(tool_executor, "send_message_to_user", payload)
+                logger.info(f"send_text_via_tool success: payload_keys={list(payload.keys())}, result={str(result)[:120]}")
+                return True
+            except Exception as e:
+                logger.debug(f"send_text_via_tool failed: payload_keys={list(payload.keys())}, error={e}")
+                continue
+        return False
 
     def _is_system_scheduler_active_for_user(self, user: dict) -> bool:
         if not self._future_task_available():
@@ -418,32 +451,41 @@ class TodoPalPlugin(Star):
 
     async def _send_text_to_origin(self, origin: str, text: str) -> bool:
         if not origin or not text:
+            logger.warning(f"send_text_to_origin skipped: invalid payload origin={bool(origin)} text={bool(text)}")
             return False
+        if await self._send_text_via_tool(origin, text):
+            return True
         send_method = getattr(self.context, "send_message", None)
         if not callable(send_method):
+            logger.error("send_text_to_origin failed: context.send_message is not callable")
             return False
         try:
             await send_method(origin, text)
             return True
-        except TypeError:
+        except TypeError as e:
+            logger.debug(f"send_text_to_origin attempt1(origin,text) type error: {e}")
             try:
                 await send_method(umo=origin, message=text)
                 return True
-            except Exception:
-                pass
-        except Exception:
-            pass
+            except Exception as e2:
+                logger.debug(f"send_text_to_origin attempt2(umo,message=text) failed: {e2}")
+        except Exception as e:
+            logger.debug(f"send_text_to_origin attempt1(origin,text) failed: {e}")
         try:
             await send_method(origin, [Plain(text)])
             return True
-        except TypeError:
+        except TypeError as e:
+            logger.debug(f"send_text_to_origin attempt3(origin,[Plain]) type error: {e}")
             try:
                 await send_method(umo=origin, message=[Plain(text)])
                 return True
-            except Exception:
+            except Exception as e2:
+                logger.error(f"send_text_to_origin attempt4(umo,message=[Plain]) failed: {e2}")
                 return False
-        except Exception:
+        except Exception as e:
+            logger.error(f"send_text_to_origin attempt3(origin,[Plain]) failed: {e}")
             return False
+        logger.error("send_text_to_origin failed: all send paths exhausted")
         return False
 
     @staticmethod
@@ -789,6 +831,8 @@ class TodoPalPlugin(Star):
                                 sent = await self._send_proactive_reminder(platform, user_id, origin, today_str, provider_id)
                                 if sent:
                                     last_reminders[user_key] = now
+                                else:
+                                    logger.warning(f"Reminder attempted but not sent for {platform}/{user_id}")
                                     
             except Exception as e:
                 logger.error(f"TodoPal cron loop error: {e}")
@@ -856,7 +900,8 @@ class TodoPalPlugin(Star):
         pending = [t for t in todos if t.get('status') == 'pending']
         
         if not pending:
-            return False # Nothing to remind
+            logger.debug(f"Reminder skipped: no pending todos for {platform}/{user_id} on {today_str}")
+            return False
         if self._resolve_reminder_text_mode() != "llm":
             reminder_text = self._render_reminder_template(pending)
             return await self._send_text_to_origin(origin, reminder_text)
@@ -1434,11 +1479,12 @@ class TodoPalPlugin(Star):
             lead_text = f"已整理 {todo_count} 项待办，确认后保存。"
         yield event.plain_result(f"{lead_text}\n\n{preview}")
 
-    @filter.regex(r"^(sub|subscribe|订阅提醒|取消提醒|提醒订阅)\s*.*")
+    @filter.regex(r"^(sub|subscribe|订阅提醒|取消提醒|提醒订阅|提醒诊断)\s*.*")
     async def reminder_subscription(self, event: AstrMessageEvent):
         message_str = event.message_str.strip()
         if not message_str:
             return
+        logger.info(f"Reminder command received: {message_str} from {getattr(event, 'unified_msg_origin', '')}")
         lower_text = message_str.lower()
         action = ""
         if message_str.startswith("订阅提醒"):
@@ -1447,6 +1493,8 @@ class TodoPalPlugin(Star):
             action = "off"
         elif message_str.startswith("提醒订阅"):
             action = "list"
+        elif message_str.startswith("提醒诊断"):
+            action = "debug"
         else:
             match = re.match(r"^(sub|subscribe)\s*(.*)$", lower_text, re.IGNORECASE)
             if not match:
@@ -1456,6 +1504,8 @@ class TodoPalPlugin(Star):
                 action = "on"
             elif arg in ("off", "0", "false", "disable", "stop", "关闭", "关", "取消"):
                 action = "off"
+            elif arg in ("debug", "diag", "test", "诊断", "测试"):
+                action = "debug"
             else:
                 action = "list"
         platform, user_id = self._event_scope(event)
@@ -1467,6 +1517,33 @@ class TodoPalPlugin(Star):
         if action == "off":
             self._set_user_reminder_subscription(platform, user_id, False)
             yield event.plain_result("已关闭提醒订阅。")
+            return
+        if action == "debug":
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            user = self.storage.get_user_info(platform, user_id)
+            todos = self.storage.load_todos(platform, user_id, today_str)
+            pending = [t for t in todos if t.get("status") == "pending"]
+            subscribed = self._is_user_reminder_subscribed(user)
+            reminder_enable = bool(self.config.get("reminder_enable", False))
+            system_scheduler_active = self._is_system_scheduler_active_for_user(user)
+            now_hhmm = datetime.now().strftime("%H:%M")
+            reminder_start = self._normalize_hhmm(self.config.get("reminder_start", "09:00"), "09:00")
+            reminder_end = self._normalize_hhmm(self.config.get("reminder_end", "22:00"), "22:00")
+            in_window = reminder_start <= now_hhmm <= reminder_end
+            origin = getattr(event, "unified_msg_origin", "") or ""
+            send_ok = await self._send_text_to_origin(origin, "TodoPal 提醒链路诊断：主动发送通道可用。")
+            summary = (
+                f"诊断结果\n"
+                f"- reminder_enable: {reminder_enable}\n"
+                f"- 订阅状态: {subscribed}\n"
+                f"- 系统调度已接管: {system_scheduler_active}\n"
+                f"- 当前时间窗口: {in_window} ({now_hhmm} in {reminder_start}-{reminder_end})\n"
+                f"- 今日待办总数: {len(todos)}\n"
+                f"- 今日待办未完成: {len(pending)}\n"
+                f"- origin可用: {bool(origin)}\n"
+                f"- 主动发送链路: {'可用' if send_ok else '失败'}"
+            )
+            yield event.plain_result(summary)
             return
         user = self.storage.get_user_info(platform, user_id)
         subscribed = self._is_user_reminder_subscribed(user)
