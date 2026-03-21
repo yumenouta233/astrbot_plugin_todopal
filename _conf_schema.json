@@ -75,5 +75,10 @@
     "type": "string",
     "description": "晚间总结发送时间 (HH:MM，如 23:00)",
     "default": "23:00"
+  },
+  "todo_default_tags": {
+    "type": "list",
+    "description": "默认任务标签列表（新用户初始化标签用）",
+    "default": ["工作", "生活", "自我提升"]
   }
 }

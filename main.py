@@ -22,7 +22,7 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.10.7")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.11.0")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
@@ -219,6 +219,108 @@ class TodoPalPlugin(Star):
         if not isinstance(item, dict):
             return False
         return str(item.get("status", "pending")) in ("pending", "rolled_over")
+
+    @staticmethod
+    def _normalize_tag_name(name: str) -> str:
+        return str(name or "").strip()
+
+    def _default_tags(self) -> list:
+        configured = self.config.get("todo_default_tags", ["工作", "生活", "自我提升"])
+        if not isinstance(configured, list):
+            configured = ["工作", "生活", "自我提升"]
+        tags = []
+        for value in configured:
+            tag = self._normalize_tag_name(value)
+            if tag and tag not in tags:
+                tags.append(tag)
+        if not tags:
+            return ["工作", "生活", "自我提升"]
+        return tags
+
+    def _get_user_tags(self, platform: str, user_id: str) -> list:
+        user = self.storage.get_user_info(platform, user_id)
+        raw = user.get("todo_tags") if isinstance(user, dict) else None
+        if isinstance(raw, list):
+            tags = []
+            for value in raw:
+                tag = self._normalize_tag_name(value)
+                if tag and tag not in tags:
+                    tags.append(tag)
+            if tags:
+                return tags
+        tags = self._default_tags()
+        self.storage.update_user_info(platform, user_id, {"todo_tags": tags})
+        return tags
+
+    def _set_user_tags(self, platform: str, user_id: str, tags: list):
+        normalized = []
+        for value in tags or []:
+            tag = self._normalize_tag_name(value)
+            if tag and tag not in normalized:
+                normalized.append(tag)
+        self.storage.update_user_info(platform, user_id, {"todo_tags": normalized})
+
+    @staticmethod
+    def _render_tag_list(tags: list) -> str:
+        if not tags:
+            return "暂无标签。"
+        return "\n".join([f"{idx}. {name}" for idx, name in enumerate(tags, 1)])
+
+    def _build_tag_assign_help(self, todos: list, tags: list) -> str:
+        tag_list_text = self._render_tag_list(tags)
+        return (
+            "标签列表：\n"
+            f"{tag_list_text}\n\n"
+            "回复标签编排：\n"
+            f"- 共 {len(todos)} 条待办，请逐条填写标签编号\n"
+            "- 数字=绑定标签，x=丢弃该条，0=保留但不打标签\n"
+            "- 支持格式：1x3 或 1,x,3\n"
+            "- 回复“确认”可直接全部保存（不分配标签）\n"
+            "- 回复“取消”放弃本次新增"
+        )
+
+    def _parse_tag_assignment(self, text: str, todo_count: int, tag_count: int):
+        raw = str(text or "").strip()
+        if not raw:
+            return None, "请输入标签编排，例如：1x3 或 1,x,3。"
+        compact = raw.replace(" ", "")
+        if re.fullmatch(r"[0-9xX]+", compact) and len(compact) == todo_count:
+            tokens = list(compact)
+        else:
+            tokens = [token for token in re.split(r"[\s,，]+", raw) if token]
+        if len(tokens) != todo_count:
+            return None, f"编排项数量不匹配：需要 {todo_count} 项，收到 {len(tokens)} 项。"
+        parsed = []
+        for idx, token in enumerate(tokens, 1):
+            value = token.lower()
+            if value == "x":
+                parsed.append(None)
+                continue
+            if not value.isdigit():
+                return None, f"第 {idx} 项格式无效：{token}。请使用数字、x 或 0。"
+            number = int(value)
+            if number < 0 or number > tag_count:
+                return None, f"第 {idx} 项标签序号越界：{number}。可选范围是 0-{tag_count}。"
+            parsed.append(number)
+        return parsed, ""
+
+    @staticmethod
+    def _apply_tag_assignment(todos: list, tags: list, parsed: list):
+        selected = []
+        dropped = 0
+        for todo, choice in zip(todos, parsed):
+            if choice is None:
+                dropped += 1
+                continue
+            item = dict(todo)
+            if choice == 0:
+                item["tag_id"] = 0
+                item["tag_name"] = ""
+            else:
+                item["tag_id"] = choice
+                item["tag_name"] = tags[choice - 1]
+            selected.append(item)
+        return selected, dropped
 
     async def _send_text_via_tool(self, origin: str, text: str) -> bool:
         plain_message = [{"type": "plain", "text": text}]
@@ -1055,11 +1157,13 @@ class TodoPalPlugin(Star):
                 time = item.get("time")
                 content = item.get("content", "")
                 status = item.get("status", "pending")
+                tag_name = str(item.get("tag_name", "")).strip()
                 
                 prefix = f"{time} " if time else ""
                 check_mark = "✅ " if status == "done" else ""
                 rollover_mark = "↪ " if status == "rolled_over" else ""
-                result_lines.append(f"{i}. {check_mark}{rollover_mark}{prefix}{content}")
+                tag_prefix = f"[{tag_name}] " if tag_name else ""
+                result_lines.append(f"{i}. {check_mark}{rollover_mark}{tag_prefix}{prefix}{content}")
             result_lines.append("")
         
         if include_confirm_prompt:
@@ -1130,7 +1234,9 @@ class TodoPalPlugin(Star):
                 "date": todo.get("date"),
                 "time": todo.get("time"),
                 "content": todo.get("content"),
-                "status": todo.get("status", "pending")
+                "status": todo.get("status", "pending"),
+                "tag_id": todo.get("tag_id", 0),
+                "tag_name": todo.get("tag_name", "")
             })
         return items
 
@@ -1325,10 +1431,12 @@ class TodoPalPlugin(Star):
                 status = item.get("status", "pending")
                 mark = "✅ " if status == "done" else ""
                 rollover_mark = "↪ " if status == "rolled_over" else ""
+                tag_name = str(item.get("tag_name", "")).strip()
+                tag_prefix = f"[{tag_name}] " if tag_name else ""
                 tm = item.get("time")
                 prefix = f"{tm} " if tm else ""
                 content = item.get("content", "")
-                lines.append(f"{idx}. {mark}{rollover_mark}{prefix}{content}")
+                lines.append(f"{idx}. {mark}{rollover_mark}{tag_prefix}{prefix}{content}")
             if len(items) > 12:
                 lines.append(f"……其余 {len(items) - 12} 项请使用 check 查看完整清单。")
             return "\n".join(lines)
@@ -1522,23 +1630,87 @@ class TodoPalPlugin(Star):
             return
         todos = add_result.get("items") or []
         action_type = 'append' 
+        user_tags = self._get_user_tags(platform, user_id)
         self.sessions[event.unified_msg_origin] = {
-            'state': 'WAITING_CONFIRM',
+            'state': 'WAITING_TAG_ASSIGN',
             'action_type': action_type,
             'todos': todos,
+            'user_tags': user_tags,
             'source_text': todo_content,
             'platform': platform,
             'user_id': user_id
         }
 
-        preview = self._format_preview(todos, include_confirm_prompt=True)
+        preview = self._format_preview(todos, include_confirm_prompt=False)
         todo_count = len(todos)
         date_count = len({t.get("date") for t in todos if t.get("date")})
         if date_count > 1:
             lead_text = f"已整理 {todo_count} 项待办，覆盖 {date_count} 天，确认后保存。"
         else:
             lead_text = f"已整理 {todo_count} 项待办，确认后保存。"
-        yield event.plain_result(f"{lead_text}\n\n{preview}")
+        tag_help = self._build_tag_assign_help(todos, user_tags)
+        yield event.plain_result(f"{lead_text}\n\n{preview}\n{tag_help}")
+
+    @filter.regex(r"^(标签|tag)\s*.*")
+    async def manage_tags(self, event: AstrMessageEvent):
+        message = event.message_str.strip()
+        if not message:
+            return
+        platform, user_id = self._event_scope(event)
+        await self._register_event_user_context(event, platform, user_id)
+        tags = self._get_user_tags(platform, user_id)
+        lower = message.lower()
+        if message in ("标签", "标签列表") or lower in ("tag", "tag list", "tags", "tags list"):
+            yield event.plain_result(f"当前标签：\n{self._render_tag_list(tags)}")
+            return
+        add_match = re.match(r"^(标签新增|tag\s+add)\s+(.+)$", message, re.IGNORECASE)
+        if add_match:
+            new_tag = self._normalize_tag_name(add_match.group(2))
+            if not new_tag:
+                yield event.plain_result("标签名不能为空。")
+                return
+            if new_tag in tags:
+                yield event.plain_result(f"标签“{new_tag}”已存在。")
+                return
+            tags.append(new_tag)
+            self._set_user_tags(platform, user_id, tags)
+            yield event.plain_result(f"已新增标签：{new_tag}\n\n当前标签：\n{self._render_tag_list(tags)}")
+            return
+        del_match = re.match(r"^(标签删除|tag\s+del|tag\s+delete)\s+(\d+)$", message, re.IGNORECASE)
+        if del_match:
+            idx = int(del_match.group(2))
+            if idx < 1 or idx > len(tags):
+                yield event.plain_result(f"序号越界，可选范围 1-{len(tags)}。")
+                return
+            removed = tags.pop(idx - 1)
+            self._set_user_tags(platform, user_id, tags)
+            yield event.plain_result(f"已删除标签：{removed}\n\n当前标签：\n{self._render_tag_list(tags)}")
+            return
+        rename_match = re.match(r"^(标签改名|tag\s+rename)\s+(\d+)\s+(.+)$", message, re.IGNORECASE)
+        if rename_match:
+            idx = int(rename_match.group(2))
+            if idx < 1 or idx > len(tags):
+                yield event.plain_result(f"序号越界，可选范围 1-{len(tags)}。")
+                return
+            new_name = self._normalize_tag_name(rename_match.group(3))
+            if not new_name:
+                yield event.plain_result("新标签名不能为空。")
+                return
+            if new_name in tags and new_name != tags[idx - 1]:
+                yield event.plain_result(f"标签“{new_name}”已存在。")
+                return
+            old_name = tags[idx - 1]
+            tags[idx - 1] = new_name
+            self._set_user_tags(platform, user_id, tags)
+            yield event.plain_result(f"已将标签“{old_name}”改为“{new_name}”。\n\n当前标签：\n{self._render_tag_list(tags)}")
+            return
+        yield event.plain_result(
+            "标签命令支持：\n"
+            "- 标签列表 / tag list\n"
+            "- 标签新增 名称 / tag add 名称\n"
+            "- 标签删除 序号 / tag del 序号\n"
+            "- 标签改名 序号 新名称 / tag rename 序号 新名称"
+        )
 
     @filter.regex(r"^(sub|subscribe|订阅提醒|取消提醒|提醒订阅|提醒诊断)\s*.*")
     async def reminder_subscription(self, event: AstrMessageEvent):
@@ -1613,7 +1785,7 @@ class TodoPalPlugin(Star):
         status = "已订阅" if subscribed else "未订阅"
         yield event.plain_result(f"当前提醒模式：{mode}，你的状态：{status}。")
 
-    @filter.regex(r"^(确认|取消)$")
+    @filter.regex(r"^(确认|取消|[0-9xX,\s，]+)$")
     async def handle_confirmation(self, event: AstrMessageEvent):
         """
         Handle confirmation or choice selection.
@@ -1633,6 +1805,30 @@ class TodoPalPlugin(Star):
         if action == "取消":
             del self.sessions[event.unified_msg_origin]
             yield event.plain_result("已取消。")
+            return
+
+        if state == 'WAITING_TAG_ASSIGN':
+            mode = session.get('action_type', 'append')
+            tags = session.get("user_tags") or self._get_user_tags(platform, user_id)
+            if action == "确认":
+                self._save_todos(platform, user_id, todos, source_text, mode=mode)
+                del self.sessions[event.unified_msg_origin]
+                yield event.plain_result("已保存待办事项。")
+                return
+            parsed, error = self._parse_tag_assignment(action, len(todos), len(tags))
+            if error:
+                yield event.plain_result(error)
+                return
+            selected_todos, dropped_count = self._apply_tag_assignment(todos, tags, parsed)
+            del self.sessions[event.unified_msg_origin]
+            if not selected_todos:
+                yield event.plain_result("本次待办已全部丢弃。")
+                return
+            self._save_todos(platform, user_id, selected_todos, source_text, mode=mode)
+            kept_count = len(selected_todos)
+            dropped_text = f"，丢弃 {dropped_count} 项" if dropped_count > 0 else ""
+            preview = self._format_preview(selected_todos, include_confirm_prompt=False)
+            yield event.plain_result(f"已保存 {kept_count} 项待办{dropped_text}。\n\n{preview}")
             return
 
         if state == 'WAITING_CONFIRM':
@@ -1662,6 +1858,8 @@ class TodoPalPlugin(Star):
                 item['updated_at'] = item['created_at']
                 item['done_at'] = None
                 item['source_text'] = source_text
+                item['tag_id'] = int(item.get('tag_id', 0) or 0)
+                item['tag_name'] = str(item.get('tag_name', '') or '')
             
             if mode == 'overwrite':
                 self.storage.save_todos(platform, user_id, date, items)
@@ -1695,7 +1893,9 @@ class TodoPalPlugin(Star):
                 "date": item.get("date"),
                 "time": item.get("time"),
                 "content": item.get("content"),
-                "status": item.get("status", "pending")
+                "status": item.get("status", "pending"),
+                "tag_id": item.get("tag_id", 0),
+                "tag_name": item.get("tag_name", "")
             })
         today = datetime.now().strftime("%Y-%m-%d")
         tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
