@@ -78,7 +78,17 @@
   },
   "todo_default_tags": {
     "type": "list",
-    "description": "默认任务标签列表（新用户初始化标签用）",
+    "description": "默认任务标签列表（配置页维护，可用于标签编排时选择）",
     "default": ["工作", "生活", "自我提升"]
+  },
+  "todo_use_config_tags_only": {
+    "type": "bool",
+    "description": "仅使用配置页标签（开启后屏蔽“标签新增/删除/改名”命令修改）",
+    "default": false
+  },
+  "todo_allow_tag_command_edit": {
+    "type": "bool",
+    "description": "允许通过命令修改用户标签（标签列表查询始终可用）",
+    "default": true
   }
 }

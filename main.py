@@ -22,7 +22,7 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.11.0")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.11.1")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
@@ -237,7 +237,17 @@ class TodoPalPlugin(Star):
             return ["工作", "生活", "自我提升"]
         return tags
 
+    def _use_config_tags_only(self) -> bool:
+        return bool(self.config.get("todo_use_config_tags_only", False))
+
+    def _allow_tag_command_edit(self) -> bool:
+        if self._use_config_tags_only():
+            return False
+        return bool(self.config.get("todo_allow_tag_command_edit", True))
+
     def _get_user_tags(self, platform: str, user_id: str) -> list:
+        if self._use_config_tags_only():
+            return self._default_tags()
         user = self.storage.get_user_info(platform, user_id)
         raw = user.get("todo_tags") if isinstance(user, dict) else None
         if isinstance(raw, list):
@@ -253,6 +263,8 @@ class TodoPalPlugin(Star):
         return tags
 
     def _set_user_tags(self, platform: str, user_id: str, tags: list):
+        if self._use_config_tags_only():
+            return
         normalized = []
         for value in tags or []:
             tag = self._normalize_tag_name(value)
@@ -268,10 +280,12 @@ class TodoPalPlugin(Star):
 
     def _build_tag_assign_help(self, todos: list, tags: list) -> str:
         tag_list_text = self._render_tag_list(tags)
+        mode_line = "- 当前标签来源：配置页面（全局）\n" if self._use_config_tags_only() else ""
         return (
             "标签列表：\n"
             f"{tag_list_text}\n\n"
             "回复标签编排：\n"
+            f"{mode_line}"
             f"- 共 {len(todos)} 条待办，请逐条填写标签编号\n"
             "- 数字=绑定标签，x=丢弃该条，0=保留但不打标签\n"
             "- 支持格式：1x3 或 1,x,3\n"
@@ -1662,6 +1676,9 @@ class TodoPalPlugin(Star):
         lower = message.lower()
         if message in ("标签", "标签列表") or lower in ("tag", "tag list", "tags", "tags list"):
             yield event.plain_result(f"当前标签：\n{self._render_tag_list(tags)}")
+            return
+        if not self._allow_tag_command_edit():
+            yield event.plain_result("当前已启用“仅使用配置页面标签”，请在插件配置页修改标签列表。")
             return
         add_match = re.match(r"^(标签新增|tag\s+add)\s+(.+)$", message, re.IGNORECASE)
         if add_match:
