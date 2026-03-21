@@ -22,7 +22,7 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.11.1")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.12.0")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
@@ -237,6 +237,86 @@ class TodoPalPlugin(Star):
             return ["工作", "生活", "自我提升"]
         return tags
 
+    @staticmethod
+    def _default_tag_emoji_map() -> dict:
+        return {
+            "工作": "💼",
+            "生活": "🏠",
+            "自我提升": "📚",
+            "学习": "📚"
+        }
+
+    def _config_tag_meta(self) -> list:
+        configured = self.config.get("todo_tag_meta", [])
+        if not isinstance(configured, list):
+            configured = []
+        meta = []
+        seen = set()
+        for idx, raw in enumerate(configured, 1):
+            name = ""
+            emoji = ""
+            if isinstance(raw, str):
+                parts = re.split(r"[|｜]", raw, maxsplit=1)
+                name = self._normalize_tag_name(parts[0] if parts else "")
+                emoji = str(parts[1]).strip() if len(parts) > 1 else ""
+            elif isinstance(raw, dict):
+                name = self._normalize_tag_name(raw.get("name"))
+                emoji = str(raw.get("emoji", "")).strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            meta.append({"id": idx, "name": name, "emoji": emoji, "order": len(meta) + 1})
+        defaults = self._default_tags()
+        fallback_map = self._default_tag_emoji_map()
+        for default_name in defaults:
+            if default_name in seen:
+                continue
+            seen.add(default_name)
+            meta.append({
+                "id": len(meta) + 1,
+                "name": default_name,
+                "emoji": fallback_map.get(default_name, ""),
+                "order": len(meta) + 1
+            })
+        return meta
+
+    def _tag_emoji_map(self) -> dict:
+        mapping = {}
+        for item in self._config_tag_meta():
+            name = str(item.get("name", "")).strip()
+            emoji = str(item.get("emoji", "")).strip()
+            if name:
+                mapping[name] = emoji
+        return mapping
+
+    def _tag_order_map(self) -> dict:
+        order = {}
+        for idx, item in enumerate(self._config_tag_meta(), 1):
+            name = str(item.get("name", "")).strip()
+            if name and name not in order:
+                order[name] = idx
+        return order
+
+    def _tag_display_prefix(self, tag_name: str, fallback_tag_id: int = 0) -> str:
+        normalized = self._normalize_tag_name(tag_name)
+        emoji_map = self._tag_emoji_map()
+        emoji = emoji_map.get(normalized, "")
+        if emoji:
+            return f"{emoji} "
+        if normalized:
+            return f"{normalized} "
+        if int(fallback_tag_id or 0) > 0:
+            tags = self._default_tags()
+            idx = int(fallback_tag_id) - 1
+            if 0 <= idx < len(tags):
+                fallback_name = tags[idx]
+                fallback_emoji = emoji_map.get(fallback_name, "")
+                if fallback_emoji:
+                    return f"{fallback_emoji} "
+                if fallback_name:
+                    return f"{fallback_name} "
+        return ""
+
     def _use_config_tags_only(self) -> bool:
         return bool(self.config.get("todo_use_config_tags_only", False))
 
@@ -272,14 +352,21 @@ class TodoPalPlugin(Star):
                 normalized.append(tag)
         self.storage.update_user_info(platform, user_id, {"todo_tags": normalized})
 
-    @staticmethod
-    def _render_tag_list(tags: list) -> str:
+    def _render_tag_list(self, tags: list) -> str:
         if not tags:
             return "暂无标签。"
-        return "\n".join([f"{idx}. {name}" for idx, name in enumerate(tags, 1)])
+        rows = []
+        for idx, name in enumerate(tags, 1):
+            prefix = self._tag_display_prefix(name, idx)
+            rows.append(f"{idx}. {prefix}{name}" if prefix else f"{idx}. {name}")
+        return "\n".join(rows)
 
     def _build_tag_assign_help(self, todos: list, tags: list) -> str:
-        tag_list_text = self._render_tag_list(tags)
+        lines = []
+        for idx, name in enumerate(tags, 1):
+            prefix = self._tag_display_prefix(name, idx)
+            lines.append(f"{idx}. {prefix}{name}" if prefix else f"{idx}. {name}")
+        tag_list_text = "\n".join(lines) if lines else "暂无标签。"
         mode_line = "- 当前标签来源：配置页面（全局）\n" if self._use_config_tags_only() else ""
         return (
             "标签列表：\n"
@@ -335,6 +422,249 @@ class TodoPalPlugin(Star):
                 item["tag_name"] = tags[choice - 1]
             selected.append(item)
         return selected, dropped
+
+    @staticmethod
+    def _parse_hhmm_minutes(value: str):
+        text = str(value or "").strip()
+        matched = re.match(r"^([01]?\d|2[0-3]):([0-5]\d)$", text)
+        if not matched:
+            return None
+        return int(matched.group(1)) * 60 + int(matched.group(2))
+
+    @staticmethod
+    def _format_minutes_hhmm(minutes: int) -> str:
+        clamped = max(0, min(23 * 60 + 59, int(minutes)))
+        return f"{clamped // 60:02d}:{clamped % 60:02d}"
+
+    def _resolve_check_view_mode(self, query_text: str = ""):
+        text = str(query_text or "").strip()
+        low = text.lower()
+        explicit_raw = bool(re.search(r"(原始|原样|\braw\b)", text, re.IGNORECASE))
+        explicit_plan = bool(re.search(r"(计划|安排|安排表|排程|时间线|标签)", text, re.IGNORECASE))
+        cleaned = re.sub(r"(原始|原样|\braw\b|计划|安排表|安排|排程|时间线|标签)", " ", text, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if explicit_raw:
+            return "raw", cleaned
+        if explicit_plan:
+            return "plan", cleaned
+        configured = str(self.config.get("todo_check_default_mode", "plan") or "plan").strip().lower()
+        mode = "plan" if configured not in ("raw", "original") else "raw"
+        if low in ("", "今天", "明天", "后天"):
+            return mode, cleaned
+        return mode, cleaned
+
+    @staticmethod
+    def _rule_rank_unscheduled(content: str, status: str = "pending") -> tuple:
+        text = str(content or "").lower()
+        urgent_words = ("紧急", "马上", "立刻", "尽快", "截止", "ddl", "提交", "开会", "会议", "汇报", "回复")
+        important_words = ("项目", "客户", "面试", "考试", "论文", "合同", "报销", "发布")
+        light_words = ("整理", "学习", "阅读", "复盘", "看看", "收拾", "散步")
+        urgency = 1 + sum(1 for w in urgent_words if w in text)
+        importance = 1 + sum(1 for w in important_words if w in text)
+        effort = 1 + sum(1 for w in light_words if w in text)
+        if status == "rolled_over":
+            urgency += 1
+        score = urgency * 3 + importance * 2 - effort
+        duration = 45 if effort >= 3 else 30
+        return score, duration
+
+    async def _llm_rank_unscheduled(self, event: AstrMessageEvent, target_date: str, items: list):
+        if not bool(self.config.get("todo_llm_priority_enable", False)):
+            return {}
+        provider_id = await self._get_provider_id_from_origin(event.unified_msg_origin)
+        if not provider_id:
+            return {}
+        payload_items = []
+        for idx, item in enumerate(items, 1):
+            payload_items.append({
+                "index": idx,
+                "content": str(item.get("content", "")),
+                "tag": str(item.get("tag_name", "")),
+                "status": str(item.get("status", "pending"))
+            })
+        prompt = (
+            "你是任务调度器。请仅返回 JSON 数组，每项包含 index, priority, duration_min。\n"
+            f"日期：{target_date}\n"
+            f"任务：{json.dumps(payload_items, ensure_ascii=False)}\n"
+            "约束：priority 为 1-10，越大越优先；duration_min 为 15-120 的 5 分钟整数。\n"
+            "不要输出解释，不要 markdown。"
+        )
+        try:
+            resp = await self.context.llm_generate(chat_provider_id=provider_id, prompt=prompt)
+            text = self._extract_completion_text(resp)
+            if not text:
+                return {}
+            stripped = text.strip()
+            if stripped.startswith("```"):
+                stripped = re.sub(r"^```[a-zA-Z]*\s*", "", stripped)
+                stripped = re.sub(r"\s*```$", "", stripped)
+            data = json.loads(stripped)
+            result = {}
+            if isinstance(data, list):
+                for row in data:
+                    if not isinstance(row, dict):
+                        continue
+                    idx = int(row.get("index", 0))
+                    pri = int(row.get("priority", 0))
+                    dur = int(row.get("duration_min", 0))
+                    if idx <= 0:
+                        continue
+                    pri = max(1, min(10, pri))
+                    if dur <= 0:
+                        dur = int(self.config.get("todo_default_flexible_duration_minutes", 30))
+                    dur = max(15, min(120, dur))
+                    dur = (dur // 5) * 5
+                    result[idx - 1] = {"priority": pri, "duration": dur}
+            return result
+        except Exception:
+            return {}
+
+    async def _build_plan_result(self, event: AstrMessageEvent, target_date: str, todos: list):
+        unfinished = [item for item in todos if self._is_unfinished_todo(item)]
+        if not unfinished:
+            return {
+                "timeline": [],
+                "backlog": [],
+                "total": len(todos),
+                "unfinished_count": 0,
+                "fixed_count": 0
+            }
+        fixed_block = int(self.config.get("todo_fixed_task_block_minutes", 45) or 45)
+        fixed_block = max(15, min(180, fixed_block))
+        default_duration = int(self.config.get("todo_default_flexible_duration_minutes", 30) or 30)
+        default_duration = max(15, min(120, default_duration))
+        day_start = self._parse_hhmm_minutes(self._normalize_hhmm(str(self.config.get("todo_workday_start", "09:00")), "09:00"))
+        day_end = self._parse_hhmm_minutes(self._normalize_hhmm(str(self.config.get("todo_workday_end", "22:00")), "22:00"))
+        if day_start is None:
+            day_start = 9 * 60
+        if day_end is None:
+            day_end = 22 * 60
+        if day_end <= day_start:
+            day_end = day_start + 8 * 60
+        min_gap = int(self.config.get("todo_min_gap_minutes", 15) or 15)
+        min_gap = max(10, min(60, min_gap))
+
+        fixed = []
+        flex = []
+        for item in unfinished:
+            minute = self._parse_hhmm_minutes(item.get("time"))
+            copied = dict(item)
+            copied["_minute"] = minute
+            if minute is None:
+                flex.append(copied)
+            else:
+                fixed.append(copied)
+
+        tag_order = self._tag_order_map()
+        fixed.sort(key=lambda x: (x.get("_minute", 0), tag_order.get(str(x.get("tag_name", "")).strip(), 999), str(x.get("content", ""))))
+
+        llm_rank = await self._llm_rank_unscheduled(event, target_date, flex)
+        ranked_flex = []
+        for idx, item in enumerate(flex):
+            if idx in llm_rank:
+                pri = llm_rank[idx]["priority"] * 10
+                dur = llm_rank[idx]["duration"]
+            else:
+                score, dur = self._rule_rank_unscheduled(item.get("content", ""), item.get("status", "pending"))
+                pri = score
+            ranked_flex.append((pri, dur if dur > 0 else default_duration, item))
+        ranked_flex.sort(key=lambda t: (-t[0], tag_order.get(str(t[2].get("tag_name", "")).strip(), 999), str(t[2].get("content", ""))))
+
+        occupied = []
+        timeline = []
+        for item in fixed:
+            start = item.get("_minute")
+            end = min(day_end, start + fixed_block)
+            occupied.append((start, end))
+            timeline.append({
+                "kind": "fixed",
+                "start": start,
+                "end": end,
+                "item": item
+            })
+        occupied.sort(key=lambda p: p[0])
+        gaps = []
+        cursor = day_start
+        for start, end in occupied:
+            if start - cursor >= min_gap:
+                gaps.append([cursor, start])
+            cursor = max(cursor, end)
+        if day_end - cursor >= min_gap:
+            gaps.append([cursor, day_end])
+
+        backlog = []
+        for pri, duration, item in ranked_flex:
+            placed = False
+            duration = max(min_gap, duration)
+            for gap in gaps:
+                gs, ge = gap[0], gap[1]
+                if ge - gs >= duration:
+                    start = gs
+                    end = gs + duration
+                    timeline.append({
+                        "kind": "flex",
+                        "start": start,
+                        "end": end,
+                        "item": item,
+                        "priority": pri
+                    })
+                    gap[0] = end
+                    placed = True
+                    break
+            if not placed:
+                backlog.append({
+                    "item": item,
+                    "priority": pri,
+                    "duration": duration
+                })
+        timeline.sort(key=lambda x: x["start"])
+        return {
+            "timeline": timeline,
+            "backlog": backlog,
+            "total": len(todos),
+            "unfinished_count": len(unfinished),
+            "fixed_count": len(fixed)
+        }
+
+    def _format_plan_preview(self, target_date: str, plan_result: dict) -> str:
+        timeline = plan_result.get("timeline", []) or []
+        backlog = plan_result.get("backlog", []) or []
+        total = int(plan_result.get("total", 0))
+        unfinished_count = int(plan_result.get("unfinished_count", 0))
+        fixed_count = int(plan_result.get("fixed_count", 0))
+        lines = [
+            f"{target_date} 安排表",
+            f"总计 {total} 项，未完成 {unfinished_count} 项，固定时间 {fixed_count} 项。"
+        ]
+        if not timeline and not backlog:
+            lines.append("今天的待办都完成啦。")
+            return "\n".join(lines)
+        if timeline:
+            lines.append("")
+            lines.append("时间线：")
+            for idx, row in enumerate(timeline, 1):
+                item = row.get("item", {})
+                prefix = self._tag_display_prefix(item.get("tag_name", ""), item.get("tag_id", 0))
+                content = str(item.get("content", ""))
+                mark = "⏰" if row.get("kind") == "fixed" else "🧩"
+                start = self._format_minutes_hhmm(row.get("start", 0))
+                end = self._format_minutes_hhmm(row.get("end", row.get("start", 0)))
+                if row.get("kind") == "fixed":
+                    lines.append(f"{idx}. {mark} {start} {prefix}{content}".strip())
+                else:
+                    lines.append(f"{idx}. {mark} {start}-{end} {prefix}{content}".strip())
+        if backlog:
+            lines.append("")
+            lines.append("候补：")
+            for idx, row in enumerate(backlog, 1):
+                item = row.get("item", {})
+                prefix = self._tag_display_prefix(item.get("tag_name", ""), item.get("tag_id", 0))
+                content = str(item.get("content", ""))
+                duration = int(row.get("duration", 0))
+                lines.append(f"{idx}. {prefix}{content}（建议 {duration} 分钟）".strip())
+        lines.append("")
+        lines.append("回复“check 原始”可查看原始清单。")
+        return "\n".join(lines)
 
     async def _send_text_via_tool(self, origin: str, text: str) -> bool:
         plain_message = [{"type": "plain", "text": text}]
@@ -1172,11 +1502,12 @@ class TodoPalPlugin(Star):
                 content = item.get("content", "")
                 status = item.get("status", "pending")
                 tag_name = str(item.get("tag_name", "")).strip()
+                tag_id = int(item.get("tag_id", 0) or 0)
                 
                 prefix = f"{time} " if time else ""
                 check_mark = "✅ " if status == "done" else ""
                 rollover_mark = "↪ " if status == "rolled_over" else ""
-                tag_prefix = f"[{tag_name}] " if tag_name else ""
+                tag_prefix = self._tag_display_prefix(tag_name, tag_id)
                 result_lines.append(f"{i}. {check_mark}{rollover_mark}{tag_prefix}{prefix}{content}")
             result_lines.append("")
         
@@ -1446,7 +1777,8 @@ class TodoPalPlugin(Star):
                 mark = "✅ " if status == "done" else ""
                 rollover_mark = "↪ " if status == "rolled_over" else ""
                 tag_name = str(item.get("tag_name", "")).strip()
-                tag_prefix = f"[{tag_name}] " if tag_name else ""
+                tag_id = int(item.get("tag_id", 0) or 0)
+                tag_prefix = self._tag_display_prefix(tag_name, tag_id)
                 tm = item.get("time")
                 prefix = f"{tm} " if tm else ""
                 content = item.get("content", "")
@@ -1902,7 +2234,8 @@ class TodoPalPlugin(Star):
         yield event.plain_result(f"{result.get('message', '已更新状态。')}\n\n{preview}")
 
     async def _handle_check_command(self, event: AstrMessageEvent, platform: str, user_id: str, query_text: str = "", payload=None):
-        target_date = self._resolve_check_date(query_text, payload)
+        view_mode, cleaned_query = self._resolve_check_view_mode(query_text)
+        target_date = self._resolve_check_date(cleaned_query, payload)
         service_result = await self._service_check(platform, user_id, target_date)
         todos = []
         for item in service_result.get("items", []):
@@ -1932,8 +2265,14 @@ class TodoPalPlugin(Star):
         if not todos:
             yield event.plain_result(empty_text)
             return
-        preview = self._format_preview(todos, include_confirm_prompt=False)
-        yield event.plain_result(f"{title}\n\n{preview}")
+        if view_mode == "raw":
+            raw_title = title.replace("待办清单", "原始清单")
+            preview = self._format_preview(todos, include_confirm_prompt=False)
+            yield event.plain_result(f"{raw_title}\n\n{preview}")
+            return
+        plan_result = await self._build_plan_result(event, target_date, todos)
+        preview = self._format_plan_preview(target_date, plan_result)
+        yield event.plain_result(preview)
 
     async def _handle_fix_command(self, event: AstrMessageEvent, platform: str, user_id: str, content: str):
         """

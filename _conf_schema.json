@@ -81,6 +81,11 @@
     "description": "默认任务标签列表（配置页维护，可用于标签编排时选择）",
     "default": ["工作", "生活", "自我提升"]
   },
+  "todo_tag_meta": {
+    "type": "list",
+    "description": "标签与emoji映射，格式：标签|emoji，例如 工作|💼",
+    "default": ["工作|💼", "生活|🏠", "自我提升|📚"]
+  },
   "todo_use_config_tags_only": {
     "type": "bool",
     "description": "仅使用配置页标签（开启后屏蔽“标签新增/删除/改名”命令修改）",
@@ -90,5 +95,40 @@
     "type": "bool",
     "description": "允许通过命令修改用户标签（标签列表查询始终可用）",
     "default": true
+  },
+  "todo_check_default_mode": {
+    "type": "string",
+    "description": "check默认视图：plan(安排表) 或 raw(原始清单)",
+    "default": "plan"
+  },
+  "todo_llm_priority_enable": {
+    "type": "bool",
+    "description": "安排表中无固定时间任务启用LLM优先级评分",
+    "default": false
+  },
+  "todo_workday_start": {
+    "type": "string",
+    "description": "安排表插空起始时间 (HH:MM)",
+    "default": "09:00"
+  },
+  "todo_workday_end": {
+    "type": "string",
+    "description": "安排表插空结束时间 (HH:MM)",
+    "default": "22:00"
+  },
+  "todo_fixed_task_block_minutes": {
+    "type": "int",
+    "description": "固定时间任务默认占用时长（分钟）",
+    "default": 45
+  },
+  "todo_default_flexible_duration_minutes": {
+    "type": "int",
+    "description": "无固定时间任务默认插空时长（分钟）",
+    "default": 30
+  },
+  "todo_min_gap_minutes": {
+    "type": "int",
+    "description": "插空最小有效空档（分钟）",
+    "default": 15
   }
 }

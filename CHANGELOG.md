@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.12.0] - 2026-03-21
+
+### Added
+- 新增配置页标签 emoji 映射：`todo_tag_meta`，支持 `标签|emoji` 格式用于移动端展示。
+- 新增安排表相关配置：`todo_check_default_mode`、`todo_llm_priority_enable`、`todo_workday_start/end`、`todo_fixed_task_block_minutes`、`todo_default_flexible_duration_minutes`、`todo_min_gap_minutes`。
+
+### Changed
+- `check` 默认视图可配置为安排表；支持 `check 原始` 显示旧版原始清单。
+- 安排表逻辑支持固定时间任务优先、无固定时间任务按优先级插空，并输出候补区。
+- 待办标签展示由 `[标签]` 升级为 emoji/文本前缀，优化手机端阅读体验。
+
 ## [1.11.1] - 2026-03-21
 
 ### Changed
