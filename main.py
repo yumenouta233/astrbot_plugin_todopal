@@ -11,7 +11,6 @@ from pathlib import Path
 import asyncio
 import inspect
 from datetime import datetime, timedelta
-from astrbot.api.message_components import Plain
 
 try:
     from .llm_parser import parse_todo, analyze_intent
@@ -22,7 +21,7 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.10.4")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.10.5")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
@@ -192,6 +191,26 @@ class TodoPalPlugin(Star):
             return parts[-1]
         return str(origin)
 
+    @staticmethod
+    def _is_send_result_success(result) -> bool:
+        if result is None:
+            return True
+        if isinstance(result, bool):
+            return result
+        if isinstance(result, str):
+            text = result.strip().lower()
+            if "error" in text or "failed" in text or "permission denied" in text:
+                return False
+            if "message sent to session" in text or "success" in text or "ok" in text:
+                return True
+            return True
+        if isinstance(result, dict):
+            for key in ("ok", "success", "succeed"):
+                if key in result:
+                    return bool(result.get(key))
+            return True
+        return True
+
     async def _send_text_via_tool(self, origin: str, text: str) -> bool:
         plain_message = [{"type": "plain", "text": text}]
         session_id = self._origin_session_id(origin)
@@ -199,15 +218,16 @@ class TodoPalPlugin(Star):
         if callable(direct_method):
             direct_payloads = [
                 {"messages": plain_message, "unified_msg_origin": origin},
-                {"messages": plain_message, "session_id": origin},
                 {"messages": plain_message, "session_id": session_id},
-                {"messages": plain_message, "umo": origin},
-                {"messages": plain_message, "session": origin},
                 {"messages": plain_message}
             ]
             for payload in direct_payloads:
                 try:
                     result = await self._call_maybe_async(direct_method, **payload)
+                    if not self._is_send_result_success(result):
+                        self._last_send_error = f"direct_send_message_to_user({list(payload.keys())}) returned non-success: {result}"
+                        logger.debug(f"send_text_via_direct_method non-success: payload_keys={list(payload.keys())}, result={result}")
+                        continue
                     logger.info(f"send_text_via_direct_method success: payload_keys={list(payload.keys())}, result={str(result)[:120]}")
                     return True
                 except Exception as e:
@@ -218,15 +238,16 @@ class TodoPalPlugin(Star):
             return False
         payloads = [
             {"messages": plain_message, "unified_msg_origin": origin},
-            {"messages": plain_message, "session_id": origin},
             {"messages": plain_message, "session_id": session_id},
-            {"messages": plain_message, "umo": origin},
-            {"messages": plain_message, "session": origin},
             {"messages": plain_message}
         ]
         for payload in payloads:
             try:
                 result = await self._call_tool_executor(tool_executor, "send_message_to_user", payload)
+                if not self._is_send_result_success(result):
+                    self._last_send_error = f"tool_send_message_to_user({list(payload.keys())}) returned non-success: {result}"
+                    logger.debug(f"send_text_via_tool non-success: payload_keys={list(payload.keys())}, result={result}")
+                    continue
                 logger.info(f"send_text_via_tool success: payload_keys={list(payload.keys())}, result={str(result)[:120]}")
                 return True
             except Exception as e:
@@ -497,23 +518,6 @@ class TodoPalPlugin(Star):
         except Exception as e:
             self._last_send_error = f"send_message(origin,text) error: {e}"
             logger.debug(f"send_text_to_origin attempt1(origin,text) failed: {e}")
-        try:
-            await send_method(origin, [Plain(text)])
-            return True
-        except TypeError as e:
-            self._last_send_error = f"send_message(origin,[Plain]) type error: {e}"
-            logger.debug(f"send_text_to_origin attempt3(origin,[Plain]) type error: {e}")
-            try:
-                await send_method(umo=origin, message=[Plain(text)])
-                return True
-            except Exception as e2:
-                self._last_send_error = f"send_message(umo,message=[Plain]) error: {e2}"
-                logger.error(f"send_text_to_origin attempt4(umo,message=[Plain]) failed: {e2}")
-                return False
-        except Exception as e:
-            self._last_send_error = f"send_message(origin,[Plain]) error: {e}"
-            logger.error(f"send_text_to_origin attempt3(origin,[Plain]) failed: {e}")
-            return False
         self._last_send_error = "all send paths exhausted"
         logger.error("send_text_to_origin failed: all send paths exhausted")
         return False

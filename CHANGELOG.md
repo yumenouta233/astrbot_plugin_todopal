@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.5] - 2026-03-21
+
+### Changed
+- 主动发送参数收敛为 AstrBot 推荐契约：优先 `messages + unified_msg_origin`，其次 `messages + session_id(纯ID)`，最后 `messages`。
+- 发送结果新增成功判定，避免工具返回失败文本时被误判为发送成功。
+- 移除已知不兼容的 `[Plain]` 列表发送兜底，避免触发 `'list' object has no attribute 'chain'`。
+
 ## [1.10.4] - 2026-03-21
 
 ### Changed

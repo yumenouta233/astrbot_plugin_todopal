@@ -1,6 +1,6 @@
 name: astrbot_plugin_todopal
 display_name: TodoPal
 desc: AI 驱动的待办事项管理插件。支持自然语言解析。
-version: v1.10.4
+version: v1.10.5
 author: Yumenouta
 repo: https://github.com/yumenouta233/astrbot_plugin_todopal
