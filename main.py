@@ -22,7 +22,7 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.12.1")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.12.2")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
@@ -577,7 +577,7 @@ class TodoPalPlugin(Star):
                 score, dur = self._rule_rank_unscheduled(item.get("content", ""), item.get("status", "pending"))
                 pri = score
             ranked_flex.append((pri, dur if dur > 0 else default_duration, item))
-        ranked_flex.sort(key=lambda t: (-t[0], tag_order.get(str(t[2].get("tag_name", "")).strip(), 999), str(t[2].get("content", ""))))
+        ranked_flex.sort(key=lambda t: (tag_order.get(str(t[2].get("tag_name", "")).strip(), 999), -t[0], str(t[2].get("content", ""))))
 
         occupied = []
         timeline = []
@@ -652,7 +652,18 @@ class TodoPalPlugin(Star):
             return "\n".join(lines)
         fixed_rows = [row for row in timeline if row.get("kind") == "fixed"]
         flex_rows = [row for row in timeline if row.get("kind") != "fixed"]
-        flex_rows.sort(key=lambda row: int(row.get("priority", 0)), reverse=True)
+        tag_order = self._tag_order_map()
+        default_tags = self._default_tags()
+        def _row_tag_name(row: dict) -> str:
+            item = row.get("item", {}) if isinstance(row, dict) else {}
+            name = str(item.get("tag_name", "")).strip()
+            if name:
+                return name
+            tag_id = int(item.get("tag_id", 0) or 0)
+            if tag_id > 0 and tag_id <= len(default_tags):
+                return default_tags[tag_id - 1]
+            return "未分类"
+        flex_rows.sort(key=lambda row: (tag_order.get(_row_tag_name(row), 999), -int(row.get("priority", 0)), str((row.get("item", {}) or {}).get("content", ""))))
         if fixed_rows:
             lines.append("")
             lines.append("固定时段任务：")
@@ -665,8 +676,13 @@ class TodoPalPlugin(Star):
         if flex_rows:
             lines.append("")
             lines.append("优先任务队列：")
+            current_tag = None
             for idx, row in enumerate(flex_rows, 1):
                 item = row.get("item", {})
+                tag_name = _row_tag_name(row)
+                if tag_name != current_tag:
+                    lines.append(f"{tag_name}：")
+                    current_tag = tag_name
                 prefix = self._tag_display_prefix(item.get("tag_name", ""), item.get("tag_id", 0))
                 content = str(item.get("content", ""))
                 level_text = self._priority_level_text(row.get("priority", 0))
