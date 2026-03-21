@@ -22,7 +22,7 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.12.0")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.12.1")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
@@ -436,6 +436,15 @@ class TodoPalPlugin(Star):
         clamped = max(0, min(23 * 60 + 59, int(minutes)))
         return f"{clamped // 60:02d}:{clamped % 60:02d}"
 
+    @staticmethod
+    def _priority_level_text(score: int) -> str:
+        value = int(score or 0)
+        if value >= 18:
+            return "高优"
+        if value >= 10:
+            return "中优"
+        return "低优"
+
     def _resolve_check_view_mode(self, query_text: str = ""):
         text = str(query_text or "").strip()
         low = text.lower()
@@ -632,27 +641,47 @@ class TodoPalPlugin(Star):
         total = int(plan_result.get("total", 0))
         unfinished_count = int(plan_result.get("unfinished_count", 0))
         fixed_count = int(plan_result.get("fixed_count", 0))
+        show_virtual_time = bool(self.config.get("todo_plan_show_virtual_time", False))
+        show_priority_level = bool(self.config.get("todo_plan_show_priority_level", True))
         lines = [
-            f"{target_date} 安排表",
-            f"总计 {total} 项，未完成 {unfinished_count} 项，固定时间 {fixed_count} 项。"
+            "今日执行建议",
+            f"总计 {total} 项，未完成 {unfinished_count} 项，固定时段 {fixed_count} 项。"
         ]
         if not timeline and not backlog:
             lines.append("今天的待办都完成啦。")
             return "\n".join(lines)
-        if timeline:
+        fixed_rows = [row for row in timeline if row.get("kind") == "fixed"]
+        flex_rows = [row for row in timeline if row.get("kind") != "fixed"]
+        flex_rows.sort(key=lambda row: int(row.get("priority", 0)), reverse=True)
+        if fixed_rows:
             lines.append("")
-            lines.append("时间线：")
-            for idx, row in enumerate(timeline, 1):
+            lines.append("固定时段任务：")
+            for idx, row in enumerate(fixed_rows, 1):
                 item = row.get("item", {})
                 prefix = self._tag_display_prefix(item.get("tag_name", ""), item.get("tag_id", 0))
                 content = str(item.get("content", ""))
-                mark = "⏰" if row.get("kind") == "fixed" else "🧩"
                 start = self._format_minutes_hhmm(row.get("start", 0))
-                end = self._format_minutes_hhmm(row.get("end", row.get("start", 0)))
-                if row.get("kind") == "fixed":
-                    lines.append(f"{idx}. {mark} {start} {prefix}{content}".strip())
+                lines.append(f"{idx}. ⏰ {start} {prefix}{content}".strip())
+        if flex_rows:
+            lines.append("")
+            lines.append("优先任务队列：")
+            for idx, row in enumerate(flex_rows, 1):
+                item = row.get("item", {})
+                prefix = self._tag_display_prefix(item.get("tag_name", ""), item.get("tag_id", 0))
+                content = str(item.get("content", ""))
+                level_text = self._priority_level_text(row.get("priority", 0))
+                if show_virtual_time:
+                    start = self._format_minutes_hhmm(row.get("start", 0))
+                    end = self._format_minutes_hhmm(row.get("end", row.get("start", 0)))
+                    if show_priority_level:
+                        lines.append(f"{idx}. {prefix}{content}（{start}-{end}，{level_text}）".strip())
+                    else:
+                        lines.append(f"{idx}. {prefix}{content}（{start}-{end}）".strip())
                 else:
-                    lines.append(f"{idx}. {mark} {start}-{end} {prefix}{content}".strip())
+                    if show_priority_level:
+                        lines.append(f"{idx}. {prefix}{content}（{level_text}）".strip())
+                    else:
+                        lines.append(f"{idx}. {prefix}{content}".strip())
         if backlog:
             lines.append("")
             lines.append("候补：")
@@ -661,9 +690,13 @@ class TodoPalPlugin(Star):
                 prefix = self._tag_display_prefix(item.get("tag_name", ""), item.get("tag_id", 0))
                 content = str(item.get("content", ""))
                 duration = int(row.get("duration", 0))
-                lines.append(f"{idx}. {prefix}{content}（建议 {duration} 分钟）".strip())
+                level_text = self._priority_level_text(row.get("priority", 0))
+                if show_priority_level:
+                    lines.append(f"{idx}. {prefix}{content}（{level_text}，建议 {duration} 分钟）".strip())
+                else:
+                    lines.append(f"{idx}. {prefix}{content}（建议 {duration} 分钟）".strip())
         lines.append("")
-        lines.append("回复“check 原始”可查看原始清单。")
+        lines.append("回复“check 原始”可查看原始清单，回复“check 今天”可重新生成建议。")
         return "\n".join(lines)
 
     async def _send_text_via_tool(self, origin: str, text: str) -> bool:

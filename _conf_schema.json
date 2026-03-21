@@ -130,5 +130,15 @@
     "type": "int",
     "description": "插空最小有效空档（分钟）",
     "default": 15
+  },
+  "todo_plan_show_virtual_time": {
+    "type": "bool",
+    "description": "安排表是否展示无固定时间任务的内部插空时段",
+    "default": false
+  },
+  "todo_plan_show_priority_level": {
+    "type": "bool",
+    "description": "安排表是否展示轻重缓急等级（高优/中优/低优）",
+    "default": true
   }
 }
