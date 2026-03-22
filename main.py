@@ -22,7 +22,7 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.12.3")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.12.4")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
@@ -671,9 +671,11 @@ class TodoPalPlugin(Star):
                 item = row.get("item", {})
                 prefix = self._tag_display_prefix(item.get("tag_name", ""), item.get("tag_id", 0))
                 content = str(item.get("content", ""))
+                status = str(item.get("status", "pending"))
+                rollover_mark = "↪ " if status == "rolled_over" else ""
                 start = self._format_minutes_hhmm(row.get("start", 0))
                 serial = int(item.get("index", idx) or idx)
-                lines.append(f"{serial}. ⏰ {start} {prefix}{content}".strip())
+                lines.append(f"{serial}. ⏰ {start} {rollover_mark}{prefix}{content}".strip())
         if flex_rows:
             lines.append("")
             lines.append("优先任务队列：")
@@ -687,19 +689,21 @@ class TodoPalPlugin(Star):
                 serial = int(item.get("index", idx) or idx)
                 prefix = self._tag_display_prefix(item.get("tag_name", ""), item.get("tag_id", 0))
                 content = str(item.get("content", ""))
+                status = str(item.get("status", "pending"))
+                rollover_mark = "↪ " if status == "rolled_over" else ""
                 level_text = self._priority_level_text(row.get("priority", 0))
                 if show_virtual_time:
                     start = self._format_minutes_hhmm(row.get("start", 0))
                     end = self._format_minutes_hhmm(row.get("end", row.get("start", 0)))
                     if show_priority_level:
-                        lines.append(f"{serial}. {prefix}{content}（{start}-{end}，{level_text}）".strip())
+                        lines.append(f"{serial}. {rollover_mark}{prefix}{content}（{start}-{end}，{level_text}）".strip())
                     else:
-                        lines.append(f"{serial}. {prefix}{content}（{start}-{end}）".strip())
+                        lines.append(f"{serial}. {rollover_mark}{prefix}{content}（{start}-{end}）".strip())
                 else:
                     if show_priority_level:
-                        lines.append(f"{serial}. {prefix}{content}（{level_text}）".strip())
+                        lines.append(f"{serial}. {rollover_mark}{prefix}{content}（{level_text}）".strip())
                     else:
-                        lines.append(f"{serial}. {prefix}{content}".strip())
+                        lines.append(f"{serial}. {rollover_mark}{prefix}{content}".strip())
         if backlog:
             lines.append("")
             lines.append("候补：")
@@ -1594,6 +1598,43 @@ class TodoPalPlugin(Star):
             return parsed
         return self._resolve_check_date(str(date_text), None)
 
+    def _extract_date_hint_from_text(self, text: str):
+        source = str(text or "").strip()
+        if not source:
+            return "", ""
+        explicit = re.search(r"(\d{4}[-/]\d{1,2}[-/]\d{1,2})", source)
+        if explicit:
+            raw = explicit.group(1)
+            parsed = self._normalize_date_str(raw)
+            cleaned = (source[:explicit.start()] + source[explicit.end():]).strip()
+            return parsed or "", cleaned
+        md = re.search(r"(\d{1,2}月\d{1,2}日)", source)
+        if md:
+            raw = md.group(1)
+            parsed = self._normalize_date_str(raw)
+            cleaned = (source[:md.start()] + source[md.end():]).strip()
+            return parsed or "", cleaned
+        for keyword in ("后天", "明天", "今天"):
+            pos = source.find(keyword)
+            if pos >= 0:
+                cleaned = (source[:pos] + source[pos + len(keyword):]).strip()
+                parsed = self._resolve_check_date(keyword, None)
+                return parsed, cleaned
+        return "", source
+
+    @staticmethod
+    def _has_explicit_date_expression(text: str) -> bool:
+        source = (text or "").strip()
+        if not source:
+            return False
+        patterns = [
+            r"(今天|明天|后天)",
+            r"\d{4}[-/]\d{1,2}[-/]\d{1,2}",
+            r"\d{1,2}月\d{1,2}日",
+            r"\b(today|tomorrow|day\s*after\s*tomorrow)\b"
+        ]
+        return any(re.search(pattern, source, re.IGNORECASE) for pattern in patterns)
+
     @staticmethod
     def _has_explicit_time_expression(text: str) -> bool:
         source = (text or "").strip()
@@ -1607,14 +1648,22 @@ class TodoPalPlugin(Star):
         ]
         return any(re.search(pattern, source, re.IGNORECASE) for pattern in patterns)
 
-    def _sanitize_parsed_todos(self, todos: list, source_text: str, explicit_time_text: str = "") -> list:
+    def _sanitize_parsed_todos(self, todos: list, source_text: str, explicit_time_text: str = "", explicit_date_text: str = "") -> list:
         allow_time = bool((explicit_time_text or "").strip()) or self._has_explicit_time_expression(source_text)
+        explicit_date = self._normalize_date_str(str(explicit_date_text).strip()) if explicit_date_text else None
+        allow_date = bool(explicit_date) or self._has_explicit_date_expression(source_text)
+        default_date = explicit_date or datetime.now().strftime("%Y-%m-%d")
         normalized = []
         for todo in todos or []:
             item = dict(todo) if isinstance(todo, dict) else {}
             time_value = item.get("time")
             if isinstance(time_value, str):
                 time_value = time_value.strip() or None
+            parsed_date = self._normalize_date_str(str(item.get("date", "")).strip()) if item.get("date") else None
+            if allow_date:
+                item["date"] = parsed_date or default_date
+            else:
+                item["date"] = default_date
             if not allow_time:
                 item["time"] = None
             else:
@@ -1723,7 +1772,7 @@ class TodoPalPlugin(Star):
                 todos = await parse_todo(self.context, provider_id, source_text)
                 if not todos:
                     return {"ok": False, "action": "add", "error": "PARSE_FAILED", "message": self._service_message("add", False, "PARSE_FAILED")}
-        todos = self._sanitize_parsed_todos(todos, source_text, time_text)
+        todos = self._sanitize_parsed_todos(todos, source_text, time_text, date_text)
         if persist:
             self._save_todos(platform, user_id, todos, source_text, mode='append')
         grouped = {}
@@ -2427,14 +2476,19 @@ class TodoPalPlugin(Star):
             yield event.plain_result("修改失败，请重试。")
 
     async def _handle_delete_command(self, event: AstrMessageEvent, platform: str, user_id: str, content: str):
-        result = await self._service_delete(platform, user_id, content, "")
+        parsed_date, selector_text = self._extract_date_hint_from_text(content)
+        selector = str(selector_text or "").strip()
+        if not selector:
+            yield event.plain_result("请提供要删除的序号或关键词，例如：del 明天 1")
+            return
+        result = await self._service_delete(platform, user_id, selector, parsed_date)
         if not result.get("ok"):
             yield event.plain_result(result.get("message", "删除失败，请重试。"))
             return
-        today = datetime.now().strftime("%Y-%m-%d")
-        fresh_todos = self.storage.load_todos(platform, user_id, today)
+        target_date = result.get("date", datetime.now().strftime("%Y-%m-%d"))
+        fresh_todos = self.storage.load_todos(platform, user_id, target_date)
         if not fresh_todos:
-            yield event.plain_result(f"{result.get('message', '已删除待办。')}\n\n今天已没有待办事项。")
+            yield event.plain_result(f"{result.get('message', '已删除待办。')}\n\n{target_date} 已没有待办事项。")
             return
         preview = self._format_preview(fresh_todos, include_confirm_prompt=False)
         yield event.plain_result(f"{result.get('message', '已删除待办。')}\n\n{preview}")

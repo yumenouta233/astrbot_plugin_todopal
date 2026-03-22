@@ -221,11 +221,19 @@ class TodoStorage:
             for t in target_todos
             if isinstance(t, dict) and t.get("rollover_source_id")
         }
+        existing_signatures = {
+            self._todo_signature(t)
+            for t in target_todos
+            if isinstance(t, dict) and str(t.get("status", "pending")) in ("pending", "rolled_over")
+        }
         carry_items = []
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         for item in pending_items:
             source_id = item.get("id", "")
             if source_id and source_id in existing_rollover_sources:
+                continue
+            signature = self._todo_signature(item)
+            if signature in existing_signatures:
                 continue
             copied = dict(item)
             copied["date"] = to_date_str
@@ -235,6 +243,7 @@ class TodoStorage:
             copied["rollover_source_id"] = source_id
             copied["rollover_from_date"] = from_date_str
             carry_items.append(copied)
+            existing_signatures.add(signature)
 
         if carry_items:
             self.append_todos(platform, user_id, to_date_str, carry_items)
@@ -246,6 +255,14 @@ class TodoStorage:
         self.save_todos(platform, user_id, from_date_str, from_todos)
 
         return len(carry_items)
+
+    @staticmethod
+    def _todo_signature(item: Dict) -> str:
+        content = " ".join(str(item.get("content", "")).strip().split()).lower()
+        time_text = str(item.get("time", "")).strip()
+        tag_name = str(item.get("tag_name", "")).strip()
+        tag_id = int(item.get("tag_id", 0) or 0)
+        return f"{content}|{time_text}|{tag_name}|{tag_id}"
 
     def save_todos(self, platform: str, user_id: str, date_str: str, todos: List[Dict]):
         """
