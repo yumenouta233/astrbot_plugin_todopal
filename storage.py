@@ -210,10 +210,6 @@ class TodoStorage:
         from_todos = self.load_todos(platform, user_id, from_date_str)
         if not from_todos:
             return 0
-            
-        pending_items = [t for t in from_todos if t.get('status') == 'pending']
-        if not pending_items:
-            return 0
 
         target_todos = self.load_todos(platform, user_id, to_date_str)
         existing_rollover_sources = {
@@ -224,35 +220,48 @@ class TodoStorage:
         existing_signatures = {
             self._todo_signature(t)
             for t in target_todos
-            if isinstance(t, dict) and str(t.get("status", "pending")) in ("pending", "rolled_over")
+            if isinstance(t, dict) and str(t.get("status", "pending")) in ("pending", "rolled_over", "done")
         }
-        carry_items = []
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        legacy_removed = 0
+        pending_items = []
+        remain_from_todos = []
+        for item in from_todos:
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("status", "pending"))
+            item_id = str(item.get("id", "")).strip()
+            if item_id and item_id in existing_rollover_sources and status in ("pending", "rolled_over"):
+                legacy_removed += 1
+                continue
+            if status == "pending":
+                pending_items.append(item)
+                continue
+            remain_from_todos.append(item)
+
+        if not pending_items and legacy_removed == 0:
+            return 0
+
+        carry_items = []
         for item in pending_items:
             source_id = item.get("id", "")
-            if source_id and source_id in existing_rollover_sources:
-                continue
             signature = self._todo_signature(item)
             if signature in existing_signatures:
                 continue
-            copied = dict(item)
-            copied["date"] = to_date_str
-            copied["id"] = f"{to_date_str.replace('-', '')}-{uuid.uuid4().hex[:6]}"
-            copied["status"] = "pending"
-            copied["updated_at"] = now_str
-            copied["rollover_source_id"] = source_id
-            copied["rollover_from_date"] = from_date_str
-            carry_items.append(copied)
+            moved = dict(item)
+            moved["date"] = to_date_str
+            moved["status"] = "rolled_over"
+            moved["updated_at"] = now_str
+            moved["rollover_source_id"] = source_id or str(moved.get("rollover_source_id", "")).strip()
+            moved["rollover_from_date"] = from_date_str
+            carry_items.append(moved)
             existing_signatures.add(signature)
 
         if carry_items:
             self.append_todos(platform, user_id, to_date_str, carry_items)
 
-        for t in from_todos:
-            if t.get('status') == 'pending':
-                t['status'] = 'rolled_over'
-                t['updated_at'] = now_str
-        self.save_todos(platform, user_id, from_date_str, from_todos)
+        self.save_todos(platform, user_id, from_date_str, remain_from_todos)
 
         return len(carry_items)
 
