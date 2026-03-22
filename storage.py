@@ -4,7 +4,6 @@ import os
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Union
-import uuid
 
 logger = logging.getLogger("astrbot")
 
@@ -176,24 +175,7 @@ class TodoStorage:
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 if isinstance(data, list):
-                    fixed = []
-                    changed = False
-                    id_to_index = {}
-                    for item in data:
-                        if not isinstance(item, dict):
-                            continue
-                        normalized = dict(item)
-                        if normalized.get("date") != date_str:
-                            normalized["date"] = date_str
-                            changed = True
-                        item_id = normalized.get("id")
-                        if item_id and item_id in id_to_index:
-                            changed = True
-                            fixed[id_to_index[item_id]] = normalized
-                        else:
-                            if item_id:
-                                id_to_index[item_id] = len(fixed)
-                            fixed.append(normalized)
+                    fixed, changed = self._normalize_todos_for_date(data, date_str)
                     if changed:
                         self.save_todos(platform, user_id, date_str, fixed)
                     return fixed
@@ -202,6 +184,99 @@ class TodoStorage:
         except (json.JSONDecodeError, OSError) as e:
             logger.error(f"Failed to load todos from {file_path}: {e}")
             return []
+
+    @staticmethod
+    def _status_rank(status: str) -> int:
+        normalized = str(status or "pending").strip().lower()
+        if normalized == "done":
+            return 3
+        if normalized == "rolled_over":
+            return 2
+        if normalized == "pending":
+            return 1
+        return 0
+
+    def _merge_todo_records(self, base: Dict, incoming: Dict, date_str: str) -> Dict:
+        result = dict(base)
+        other = dict(incoming)
+        result["date"] = date_str
+        base_status = str(result.get("status", "pending") or "pending")
+        incoming_status = str(other.get("status", "pending") or "pending")
+        if self._status_rank(incoming_status) > self._status_rank(base_status):
+            result["status"] = incoming_status
+        for key, value in other.items():
+            if key in ("date", "status"):
+                continue
+            if key not in result or result.get(key) in ("", None):
+                if value not in ("", None):
+                    result[key] = value
+        updated_base = str(result.get("updated_at", "") or "")
+        updated_incoming = str(other.get("updated_at", "") or "")
+        if updated_incoming > updated_base:
+            result["updated_at"] = updated_incoming
+        created_base = str(result.get("created_at", "") or "")
+        created_incoming = str(other.get("created_at", "") or "")
+        if created_incoming and (not created_base or created_incoming < created_base):
+            result["created_at"] = created_incoming
+        if str(result.get("status", "pending")) == "done":
+            done_base = str(result.get("done_at", "") or "")
+            done_incoming = str(other.get("done_at", "") or "")
+            if done_incoming and (not done_base or done_incoming > done_base):
+                result["done_at"] = done_incoming
+        source_id_base = str(result.get("rollover_source_id", "") or "").strip()
+        source_id_incoming = str(other.get("rollover_source_id", "") or "").strip()
+        if not source_id_base and source_id_incoming:
+            result["rollover_source_id"] = source_id_incoming
+        from_base = str(result.get("rollover_from_date", "") or "").strip()
+        from_incoming = str(other.get("rollover_from_date", "") or "").strip()
+        if from_incoming and (not from_base or from_incoming < from_base):
+            result["rollover_from_date"] = from_incoming
+        if str(result.get("id", "")).strip() == "" and str(other.get("id", "")).strip():
+            result["id"] = str(other.get("id")).strip()
+        return result
+
+    def _normalize_todos_for_date(self, todos: List[Dict], date_str: str):
+        fixed = []
+        changed = False
+        id_to_index = {}
+        signature_to_index = {}
+        for raw in todos or []:
+            if not isinstance(raw, dict):
+                changed = True
+                continue
+            normalized = dict(raw)
+            if normalized.get("date") != date_str:
+                normalized["date"] = date_str
+                changed = True
+            status = str(normalized.get("status", "pending") or "pending").strip().lower()
+            if status != str(normalized.get("status", "")).strip().lower():
+                changed = True
+            normalized["status"] = status or "pending"
+            item_id = str(normalized.get("id", "") or "").strip()
+            if normalized.get("id", "") != item_id:
+                normalized["id"] = item_id
+                changed = True
+            signature = self._todo_signature(normalized)
+            hit_index = None
+            if item_id and item_id in id_to_index:
+                hit_index = id_to_index[item_id]
+            elif signature in signature_to_index:
+                hit_index = signature_to_index[signature]
+            if hit_index is None:
+                hit_index = len(fixed)
+                fixed.append(normalized)
+                if item_id:
+                    id_to_index[item_id] = hit_index
+                signature_to_index[signature] = hit_index
+            else:
+                fixed[hit_index] = self._merge_todo_records(fixed[hit_index], normalized, date_str)
+                changed = True
+                merged_id = str(fixed[hit_index].get("id", "") or "").strip()
+                merged_signature = self._todo_signature(fixed[hit_index])
+                if merged_id:
+                    id_to_index[merged_id] = hit_index
+                signature_to_index[merged_signature] = hit_index
+        return fixed, changed
 
     def rollover_pending_todos(self, platform: str, user_id: str, from_date_str: str, to_date_str: str) -> int:
         """
@@ -283,13 +358,14 @@ class TodoStorage:
             date_str: Date string 'YYYY-MM-DD'.
             todos: List of todo items to save.
         """
+        normalized_todos, _ = self._normalize_todos_for_date(todos, date_str)
         file_path = self._get_file_path(platform, user_id, date_str)
         self.ensure_directory(file_path)
         
         try:
             with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(todos, f, ensure_ascii=False, indent=2)
-            logger.info(f"Saved {len(todos)} todos to {file_path}")
+                json.dump(normalized_todos, f, ensure_ascii=False, indent=2)
+            logger.info(f"Saved {len(normalized_todos)} todos to {file_path}")
         except OSError as e:
             logger.error(f"Failed to save todos to {file_path}: {e}")
 

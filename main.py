@@ -22,7 +22,7 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.12.6")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.12.7")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
