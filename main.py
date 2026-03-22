@@ -22,7 +22,7 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.12.4")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.12.5")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
@@ -654,6 +654,50 @@ class TodoPalPlugin(Star):
         flex_rows = [row for row in timeline if row.get("kind") != "fixed"]
         tag_order = self._tag_order_map()
         default_tags = self._default_tags()
+        def _merge_duplicate_rows(rows: list) -> list:
+            merged = {}
+            order = []
+            for row in rows:
+                item = row.get("item", {}) if isinstance(row, dict) else {}
+                key = (
+                    str(row.get("kind", "")).strip(),
+                    str(item.get("tag_name", "")).strip(),
+                    int(item.get("tag_id", 0) or 0),
+                    str(item.get("time", "")).strip(),
+                    " ".join(str(item.get("content", "")).strip().split()).lower()
+                )
+                if key not in merged:
+                    copied = dict(row)
+                    copied_item = dict(item)
+                    copied["item"] = copied_item
+                    copied["_merged_indices"] = [int(copied_item.get("index", 0) or 0)]
+                    status = str(copied_item.get("status", "pending"))
+                    copied["_has_rolled"] = status == "rolled_over"
+                    copied["_has_pending"] = status == "pending"
+                    merged[key] = copied
+                    order.append(key)
+                    continue
+                target = merged[key]
+                target_item = target.get("item", {})
+                source_index = int(item.get("index", 0) or 0)
+                if source_index > 0:
+                    target.setdefault("_merged_indices", []).append(source_index)
+                source_status = str(item.get("status", "pending"))
+                if source_status == "rolled_over":
+                    target["_has_rolled"] = True
+                if source_status == "pending":
+                    target["_has_pending"] = True
+                if int(item.get("index", 0) or 0) < int(target_item.get("index", 0) or 0):
+                    target_item["index"] = item.get("index", target_item.get("index", 0))
+                if int(row.get("priority", 0) or 0) > int(target.get("priority", 0) or 0):
+                    target["priority"] = row.get("priority", target.get("priority", 0))
+            result = []
+            for key in order:
+                row = merged[key]
+                idxs = sorted({i for i in row.get("_merged_indices", []) if i > 0})
+                row["_merged_indices"] = idxs
+                result.append(row)
+            return result
         def _row_tag_name(row: dict) -> str:
             item = row.get("item", {}) if isinstance(row, dict) else {}
             name = str(item.get("tag_name", "")).strip()
@@ -663,6 +707,10 @@ class TodoPalPlugin(Star):
             if tag_id > 0 and tag_id <= len(default_tags):
                 return default_tags[tag_id - 1]
             return "未分类"
+        original_timeline_count = len(fixed_rows) + len(flex_rows)
+        fixed_rows = _merge_duplicate_rows(fixed_rows)
+        flex_rows = _merge_duplicate_rows(flex_rows)
+        merged_hidden_count = max(0, original_timeline_count - len(fixed_rows) - len(flex_rows))
         flex_rows.sort(key=lambda row: (tag_order.get(_row_tag_name(row), 999), -int(row.get("priority", 0)), str((row.get("item", {}) or {}).get("content", ""))))
         if fixed_rows:
             lines.append("")
@@ -671,8 +719,7 @@ class TodoPalPlugin(Star):
                 item = row.get("item", {})
                 prefix = self._tag_display_prefix(item.get("tag_name", ""), item.get("tag_id", 0))
                 content = str(item.get("content", ""))
-                status = str(item.get("status", "pending"))
-                rollover_mark = "↪ " if status == "rolled_over" else ""
+                rollover_mark = "↪ " if bool(row.get("_has_rolled", False)) else ""
                 start = self._format_minutes_hhmm(row.get("start", 0))
                 serial = int(item.get("index", idx) or idx)
                 lines.append(f"{serial}. ⏰ {start} {rollover_mark}{prefix}{content}".strip())
@@ -689,19 +736,19 @@ class TodoPalPlugin(Star):
                 serial = int(item.get("index", idx) or idx)
                 prefix = self._tag_display_prefix(item.get("tag_name", ""), item.get("tag_id", 0))
                 content = str(item.get("content", ""))
-                status = str(item.get("status", "pending"))
-                rollover_mark = "↪ " if status == "rolled_over" else ""
+                rollover_mark = "↪ " if bool(row.get("_has_rolled", False)) else ""
+                merged_note = "，含顺延" if bool(row.get("_has_rolled", False)) and bool(row.get("_has_pending", False)) else ""
                 level_text = self._priority_level_text(row.get("priority", 0))
                 if show_virtual_time:
                     start = self._format_minutes_hhmm(row.get("start", 0))
                     end = self._format_minutes_hhmm(row.get("end", row.get("start", 0)))
                     if show_priority_level:
-                        lines.append(f"{serial}. {rollover_mark}{prefix}{content}（{start}-{end}，{level_text}）".strip())
+                        lines.append(f"{serial}. {rollover_mark}{prefix}{content}（{start}-{end}，{level_text}{merged_note}）".strip())
                     else:
                         lines.append(f"{serial}. {rollover_mark}{prefix}{content}（{start}-{end}）".strip())
                 else:
                     if show_priority_level:
-                        lines.append(f"{serial}. {rollover_mark}{prefix}{content}（{level_text}）".strip())
+                        lines.append(f"{serial}. {rollover_mark}{prefix}{content}（{level_text}{merged_note}）".strip())
                     else:
                         lines.append(f"{serial}. {rollover_mark}{prefix}{content}".strip())
         if backlog:
@@ -717,8 +764,11 @@ class TodoPalPlugin(Star):
                     lines.append(f"{idx}. {prefix}{content}（{level_text}，建议 {duration} 分钟）".strip())
                 else:
                     lines.append(f"{idx}. {prefix}{content}（建议 {duration} 分钟）".strip())
+        if merged_hidden_count > 0:
+            lines.append("")
+            lines.append(f"已合并重复项 {merged_hidden_count} 条（含顺延同内容）。")
         lines.append("")
-        lines.append("回复“check 原始”可查看原始清单，回复“check 今天”可重新生成建议。")
+        lines.append("回复“check 原始”可查看完整明细并使用精确序号操作，回复“check 今天”可重新生成建议。")
         return "\n".join(lines)
 
     async def _send_text_via_tool(self, origin: str, text: str) -> bool:
