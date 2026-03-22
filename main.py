@@ -1214,7 +1214,10 @@ class TodoPalPlugin(Star):
             status = str(item.get("status", "pending"))
             rollover_mark = "↪ " if status == "rolled_over" else ""
             tag_prefix = self._tag_display_prefix(item.get("tag_name", ""), item.get("tag_id", 0))
-            time_text = str(item.get("time", "")).strip()
+            raw_time = item.get("time")
+            time_text = "" if raw_time is None else str(raw_time).strip()
+            if time_text.lower() == "none":
+                time_text = ""
             time_prefix = f"{time_text} " if time_text else ""
             content = str(item.get("content", "")).strip()
             lines.append(f"{idx}. {rollover_mark}{tag_prefix}{time_prefix}{content}".strip())
