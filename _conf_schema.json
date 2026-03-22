@@ -51,6 +51,16 @@
     "description": "提醒模板，支持 {pending_count} {pending_preview} {top1} {top2} {top3}",
     "default": "你今天还有{pending_count}项待办未完成：{pending_preview}。"
   },
+  "reminder_dual_message_enable": {
+    "type": "bool",
+    "description": "提醒消息拆分为两条发送（自然语言 + 结构化可done清单）",
+    "default": true
+  },
+  "reminder_actionable_count": {
+    "type": "int",
+    "description": "结构化提醒最多展示多少条可直接done的待办",
+    "default": 5
+  },
   "reminder_interval_minutes": {
     "type": "int",
     "description": "每隔多少分钟提醒一次 (仅当有未完成待办时，最小1分钟)",

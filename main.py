@@ -22,7 +22,7 @@ except ImportError:
     from storage import TodoStorage
     from matcher import TodoMatcher
 
-@register("todopal", "TodoPal", "TodoPal Plugin", "1.12.7")
+@register("todopal", "TodoPal", "TodoPal Plugin", "1.12.8")
 class TodoPalPlugin(Star):
     """
     TodoPal plugin for AstrBot to manage todo items.
@@ -1120,6 +1120,13 @@ class TodoPalPlugin(Star):
             return "llm"
         return "template"
 
+    def _resolve_reminder_dual_message_enable(self) -> bool:
+        return bool(self.config.get("reminder_dual_message_enable", True))
+
+    def _resolve_reminder_actionable_count(self) -> int:
+        value = int(self.config.get("reminder_actionable_count", 5) or 5)
+        return max(1, min(20, value))
+
     def _subscription_required_for_reminder(self) -> bool:
         return bool(self.config.get("reminder_require_subscription", True))
 
@@ -1160,6 +1167,64 @@ class TodoPalPlugin(Star):
         for key, value in values.items():
             text = text.replace("{" + key + "}", value)
         return text
+
+    def _render_reminder_actionable(self, todos: list, pending: list) -> str:
+        if not pending:
+            return "待办速览：暂无未完成事项。"
+        default_tags = self._default_tags()
+        tag_order = self._tag_order_map()
+        max_items = self._resolve_reminder_actionable_count()
+        entries = []
+        for idx, item in enumerate(todos, 1):
+            if not self._is_unfinished_todo(item):
+                continue
+            tag_name = str(item.get("tag_name", "")).strip()
+            tag_id = int(item.get("tag_id", 0) or 0)
+            if not tag_name and tag_id > 0 and tag_id <= len(default_tags):
+                tag_name = default_tags[tag_id - 1]
+            if not tag_name:
+                tag_name = "未分类"
+            minute = self._parse_hhmm_minutes(item.get("time"))
+            status = str(item.get("status", "pending"))
+            entries.append({
+                "index": idx,
+                "item": item,
+                "tag_name": tag_name,
+                "minute": minute,
+                "status": status
+            })
+        status_order = {"rolled_over": 0, "pending": 1}
+        entries.sort(key=lambda e: (
+            tag_order.get(e["tag_name"], 999),
+            status_order.get(e["status"], 9),
+            e["minute"] is None,
+            e["minute"] if e["minute"] is not None else 10 ** 9,
+            e["index"]
+        ))
+        selected = entries[:max_items]
+        lines = ["待办速览（可直接 done）："]
+        current_tag = None
+        for row in selected:
+            item = row["item"]
+            tag_name = row["tag_name"]
+            if tag_name != current_tag:
+                lines.append(f"{tag_name}：")
+                current_tag = tag_name
+            idx = row["index"]
+            status = str(item.get("status", "pending"))
+            rollover_mark = "↪ " if status == "rolled_over" else ""
+            tag_prefix = self._tag_display_prefix(item.get("tag_name", ""), item.get("tag_id", 0))
+            time_text = str(item.get("time", "")).strip()
+            time_prefix = f"{time_text} " if time_text else ""
+            content = str(item.get("content", "")).strip()
+            lines.append(f"{idx}. {rollover_mark}{tag_prefix}{time_prefix}{content}".strip())
+        action_indexes = [str(row["index"]) for row in selected[:3]]
+        if action_indexes:
+            actions = " / ".join([f"done{i}" for i in action_indexes])
+            lines.append("")
+            lines.append(f"可直接回复：{actions}")
+        lines.append("回复“check 今天”查看完整安排。")
+        return "\n".join(lines)
 
     @staticmethod
     def _persona_text_from_data(persona_data):
@@ -1513,38 +1578,39 @@ class TodoPalPlugin(Star):
         if not pending:
             logger.debug(f"Reminder skipped: no pending todos for {platform}/{user_id} on {today_str}")
             return False
-        if self._resolve_reminder_text_mode() != "llm":
-            reminder_text = self._render_reminder_template(pending)
-            return await self._send_text_to_origin(origin, reminder_text)
-            
-        persona = self.config.get("bot_persona", "")
-        custom_prompt = self.config.get("bot_persona_prompt", "")
-        persona_instruction = await self._get_persona_instruction(persona, custom_prompt)
-        
-        prompt = f"""
+        mode = self._resolve_reminder_text_mode()
+        reminder_text = self._render_reminder_template(pending)
+        if mode == "llm":
+            persona = self.config.get("bot_persona", "")
+            custom_prompt = self.config.get("bot_persona_prompt", "")
+            persona_instruction = await self._get_persona_instruction(persona, custom_prompt)
+            top_items = [str(t.get("content", "")).strip() for t in pending if str(t.get("content", "")).strip()][:5]
+            prompt = f"""
 {persona_instruction}
 用户还有 {len(pending)} 项待办未完成，分别是：
-{[t.get('content') for t in pending]}
+{top_items}
 
-请生成一段简短的话语，主动提醒用户去完成任务，语气要自然。不要返回JSON，直接返回要说的话。
+请生成一句到两句自然提醒，语气温和，鼓励用户先完成一项即可。不要返回JSON，直接返回要说的话。
 """
-        logger.debug(f"Proactive reminder prompt: {prompt}")
-        provider_id = cached_provider_id or await self._get_provider_id_from_origin(origin)
-        if provider_id:
-            try:
-                resp = await self.context.llm_generate(chat_provider_id=provider_id, prompt=prompt)
-                if resp and hasattr(resp, 'completion_text') and resp.completion_text:
-                    msg = resp.completion_text.strip()
-                    if msg:
-                        sent = await self._send_text_to_origin(origin, msg)
-                        if sent:
-                            return True
-            except Exception as e:
-                logger.error(f"Proactive reminder llm failed for {platform}/{user_id}: {e}")
-        else:
-            logger.debug(f"Reminder provider unavailable for {platform}/{user_id}, fallback to template")
-        fallback_text = self._render_reminder_template(pending)
-        return await self._send_text_to_origin(origin, fallback_text)
+            logger.debug(f"Proactive reminder prompt: {prompt}")
+            provider_id = cached_provider_id or await self._get_provider_id_from_origin(origin)
+            if provider_id:
+                try:
+                    resp = await self.context.llm_generate(chat_provider_id=provider_id, prompt=prompt)
+                    if resp and hasattr(resp, 'completion_text') and resp.completion_text:
+                        msg = resp.completion_text.strip()
+                        if msg:
+                            reminder_text = msg
+                except Exception as e:
+                    logger.error(f"Proactive reminder llm failed for {platform}/{user_id}: {e}")
+            else:
+                logger.debug(f"Reminder provider unavailable for {platform}/{user_id}, fallback to template")
+        actionable_text = self._render_reminder_actionable(todos, pending)
+        if not self._resolve_reminder_dual_message_enable():
+            return await self._send_text_to_origin(origin, reminder_text)
+        sent_natural = await self._send_text_to_origin(origin, reminder_text)
+        sent_actionable = await self._send_text_to_origin(origin, actionable_text)
+        return sent_natural or sent_actionable
 
     async def _reply_with_persona(self, event, plain_text: str):
         """Helper to reply with persona if configured, otherwise plain text."""
