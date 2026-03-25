@@ -1307,6 +1307,9 @@ class TodoPalPlugin(Star):
             return (now + timedelta(days=1)).strftime("%Y-%m-%d")
         if "今天" in text:
             return now.strftime("%Y-%m-%d")
+        week_date, _ = self._extract_weekday_date_hint(text)
+        if week_date:
+            return week_date
         explicit = re.search(r"(\d{4}[-/]\d{1,2}[-/]\d{1,2})", text)
         if explicit:
             parsed = self._normalize_date_str(explicit.group(1))
@@ -1318,6 +1321,126 @@ class TodoPalPlugin(Star):
             if parsed:
                 return parsed
         return now.strftime("%Y-%m-%d")
+
+    def _extract_weekday_date_hint(self, text: str):
+        source = str(text or "").strip()
+        if not source:
+            return "", source
+        matched = re.search(r"(下下周|下周|本周|这周)?\s*(周[一二三四五六日天]|星期[一二三四五六日天])", source)
+        if not matched:
+            return "", source
+        prefix = (matched.group(1) or "").strip()
+        weekday_token = (matched.group(2) or "").strip()
+        weekday_char = weekday_token[-1] if weekday_token else ""
+        weekday_map = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
+        if weekday_char not in weekday_map:
+            return "", source
+        target_weekday = weekday_map[weekday_char]
+        now = datetime.now()
+        week_start = now - timedelta(days=now.weekday())
+        week_offset = 0
+        if prefix == "下周":
+            week_offset = 1
+        elif prefix == "下下周":
+            week_offset = 2
+        target_date = week_start + timedelta(days=week_offset * 7 + target_weekday)
+        if not prefix and target_date.date() < now.date():
+            target_date = target_date + timedelta(days=7)
+        cleaned = (source[:matched.start()] + source[matched.end():]).strip()
+        return target_date.strftime("%Y-%m-%d"), cleaned
+
+    @staticmethod
+    def _parse_chinese_number(text: str):
+        source = str(text or "").strip()
+        if not source:
+            return None
+        if source.isdigit():
+            return int(source)
+        digit_map = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+        if source == "十":
+            return 10
+        if "十" in source:
+            parts = source.split("十")
+            if len(parts) != 2:
+                return None
+            head = parts[0]
+            tail = parts[1]
+            tens = digit_map.get(head, 1 if head == "" else None)
+            if tens is None:
+                return None
+            if tail == "":
+                return tens * 10
+            ones = digit_map.get(tail)
+            if ones is None:
+                return None
+            return tens * 10 + ones
+        total = 0
+        for ch in source:
+            if ch not in digit_map:
+                return None
+            total = total * 10 + digit_map[ch]
+        return total
+
+    def _extract_time_hint_from_text(self, text: str):
+        source = str(text or "").strip()
+        if not source:
+            return "", source
+        hhmm = re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", source)
+        if hhmm:
+            hour = int(hhmm.group(1))
+            minute = int(hhmm.group(2))
+            cleaned = (source[:hhmm.start()] + source[hhmm.end():]).strip()
+            return f"{hour:02d}:{minute:02d}", cleaned
+        ampm = re.search(r"\b([1-9]|1[0-2])\s*(am|pm)\b", source, re.IGNORECASE)
+        if ampm:
+            hour = int(ampm.group(1))
+            marker = ampm.group(2).lower()
+            if marker == "pm" and hour < 12:
+                hour += 12
+            if marker == "am" and hour == 12:
+                hour = 0
+            cleaned = (source[:ampm.start()] + source[ampm.end():]).strip()
+            return f"{hour:02d}:00", cleaned
+        zh = re.search(r"(凌晨|早上|上午|中午|下午|晚上|今晚|明早|明晚)?\s*([零〇一二两三四五六七八九十\d]{1,3})点(?:(半)|([零〇一二两三四五六七八九十\d]{1,3})分?)?", source)
+        if not zh:
+            return "", source
+        period = (zh.group(1) or "").strip()
+        hour_raw = zh.group(2)
+        half_flag = zh.group(3)
+        minute_raw = zh.group(4)
+        hour = self._parse_chinese_number(hour_raw)
+        if hour is None or hour < 0 or hour > 23:
+            return "", source
+        minute = 0
+        if half_flag:
+            minute = 30
+        elif minute_raw:
+            parsed_minute = self._parse_chinese_number(minute_raw)
+            if parsed_minute is None or parsed_minute < 0 or parsed_minute > 59:
+                return "", source
+            minute = parsed_minute
+        if period in ("下午", "晚上", "今晚", "明晚") and hour < 12:
+            hour += 12
+        if period == "中午" and hour < 11:
+            hour += 12
+        if period in ("上午", "早上", "明早") and hour == 12:
+            hour = 0
+        if period == "凌晨" and hour == 12:
+            hour = 0
+        if hour > 23:
+            return "", source
+        cleaned = (source[:zh.start()] + source[zh.end():]).strip()
+        return f"{hour:02d}:{minute:02d}", cleaned
+
+    def _normalize_time_text(self, text: str):
+        source = str(text or "").strip()
+        if not source:
+            return None
+        hhmm = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", source)
+        if hhmm:
+            return f"{int(hhmm.group(1)):02d}:{int(hhmm.group(2)):02d}"
+        parsed, _ = self._extract_time_hint_from_text(source)
+        return parsed or None
 
     async def _reply_with_persona_prefix(self, event, lead_text: str, body_text: str):
         persona = self.config.get("bot_persona", "")
@@ -1739,6 +1862,9 @@ class TodoPalPlugin(Star):
                 cleaned = (source[:pos] + source[pos + len(keyword):]).strip()
                 parsed = self._resolve_check_date(keyword, None)
                 return parsed, cleaned
+        week_date, cleaned_week = self._extract_weekday_date_hint(source)
+        if week_date:
+            return week_date, cleaned_week
         return "", source
 
     @staticmethod
@@ -1748,6 +1874,7 @@ class TodoPalPlugin(Star):
             return False
         patterns = [
             r"(今天|明天|后天)",
+            r"(下下周|下周|本周|这周)?\s*(周[一二三四五六日天]|星期[一二三四五六日天])",
             r"\d{4}[-/]\d{1,2}[-/]\d{1,2}",
             r"\d{1,2}月\d{1,2}日",
             r"\b(today|tomorrow|day\s*after\s*tomorrow)\b"
@@ -1768,7 +1895,8 @@ class TodoPalPlugin(Star):
         return any(re.search(pattern, source, re.IGNORECASE) for pattern in patterns)
 
     def _sanitize_parsed_todos(self, todos: list, source_text: str, explicit_time_text: str = "", explicit_date_text: str = "") -> list:
-        allow_time = bool((explicit_time_text or "").strip()) or self._has_explicit_time_expression(source_text)
+        explicit_time = self._normalize_time_text(explicit_time_text)
+        allow_time = bool(explicit_time) or self._has_explicit_time_expression(source_text)
         explicit_date = self._normalize_date_str(str(explicit_date_text).strip()) if explicit_date_text else None
         allow_date = bool(explicit_date) or self._has_explicit_date_expression(source_text)
         default_date = explicit_date or datetime.now().strftime("%Y-%m-%d")
@@ -1777,7 +1905,7 @@ class TodoPalPlugin(Star):
             item = dict(todo) if isinstance(todo, dict) else {}
             time_value = item.get("time")
             if isinstance(time_value, str):
-                time_value = time_value.strip() or None
+                time_value = self._normalize_time_text(time_value.strip()) or None
             parsed_date = self._normalize_date_str(str(item.get("date", "")).strip()) if item.get("date") else None
             if allow_date:
                 item["date"] = parsed_date or default_date
@@ -1786,7 +1914,7 @@ class TodoPalPlugin(Star):
             if not allow_time:
                 item["time"] = None
             else:
-                item["time"] = time_value
+                item["time"] = time_value or explicit_time
             normalized.append(item)
         return normalized
 
@@ -1875,13 +2003,21 @@ class TodoPalPlugin(Star):
         source_text = (content or "").strip()
         if not source_text:
             return {"ok": False, "action": "add", "error": "EMPTY_CONTENT", "message": self._service_message("add", False, "EMPTY_CONTENT")}
+        inferred_date_text = ""
+        inferred_time_text = ""
+        if not str(date_text or "").strip():
+            inferred_date_text, _ = self._extract_date_hint_from_text(source_text)
+        if not str(time_text or "").strip():
+            inferred_time_text, _ = self._extract_time_hint_from_text(source_text)
+        resolved_date_text = str(date_text or inferred_date_text or "").strip()
+        resolved_time_text = self._normalize_time_text(str(time_text or inferred_time_text or "").strip()) or ""
         todos = list(parsed_todos) if isinstance(parsed_todos, list) else []
         if not todos:
-            target_date = self._resolve_date_input(date_text) if date_text else ""
+            target_date = self._resolve_date_input(resolved_date_text) if resolved_date_text else ""
             if target_date:
                 todos = [{
                     "date": target_date,
-                    "time": (time_text.strip() if time_text else None),
+                    "time": (resolved_time_text if resolved_time_text else None),
                     "content": source_text
                 }]
             else:
@@ -1891,7 +2027,7 @@ class TodoPalPlugin(Star):
                 todos = await parse_todo(self.context, provider_id, source_text)
                 if not todos:
                     return {"ok": False, "action": "add", "error": "PARSE_FAILED", "message": self._service_message("add", False, "PARSE_FAILED")}
-        todos = self._sanitize_parsed_todos(todos, source_text, time_text, date_text)
+        todos = self._sanitize_parsed_todos(todos, source_text, resolved_time_text, resolved_date_text)
         if persist:
             self._save_todos(platform, user_id, todos, source_text, mode='append')
         grouped = {}
@@ -2131,7 +2267,7 @@ class TodoPalPlugin(Star):
         result = await self._service_delete(platform, user_id, selector, date)
         yield event.plain_result(self._tool_text_response("delete", result))
 
-    @filter.regex(r"^(todo|add|done|undo|undone|撤销完成|取消完成|取消done|fix|check|del|delete|rm)\s*.*")
+    @filter.regex(r"^(?:(todo|add|done|undo|undone|撤销完成|取消完成|取消done|fix|check|del|delete|rm)\s*.*|.*\s(?:todo|add|done|undo|undone|撤销完成|取消完成|取消done|fix|check|del|delete|rm)\s*$|(?!(?:确认|取消|[0-9xX,\s，]+)$).*(?:记|待办|任务|清单|列表|今天|明天|后天|周[一二三四五六日天]|星期[一二三四五六日天]).*)$")
     async def todo_parse(self, event: AstrMessageEvent):
         """
         Parse todo items from user input.
@@ -2144,14 +2280,20 @@ class TodoPalPlugin(Star):
             return
 
         explicit_match = re.match(r"^(todo|add|done|undo|undone|撤销完成|取消完成|取消done|fix|check|del|delete|rm)\s*(.*)", message_str, re.IGNORECASE)
-        if not explicit_match:
-            return
-        command_prefix = explicit_match.group(1).lower()
+        suffix_match = re.match(r"^(.*?)\s+(todo|add|done|undo|undone|撤销完成|取消完成|取消done|fix|check|del|delete|rm)\s*$", message_str, re.IGNORECASE)
+        if explicit_match:
+            command_prefix = explicit_match.group(1).lower()
+            todo_content = explicit_match.group(2).strip()
+        elif suffix_match:
+            command_prefix = suffix_match.group(2).lower()
+            todo_content = suffix_match.group(1).strip()
+        else:
+            command_prefix = "todo"
+            todo_content = message_str
         if command_prefix in ("del", "delete", "rm"):
             command_prefix = "delete"
         if command_prefix in ("undo", "undone", "撤销完成", "取消完成", "取消done"):
             command_prefix = "undone"
-        todo_content = explicit_match.group(2).strip()
 
         user_id = event.get_sender_id()
         try:
