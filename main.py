@@ -4,6 +4,7 @@ from astrbot.api import logger
 from datetime import datetime
 import re
 import uuid
+import hashlib
 
 import json
 import os
@@ -52,6 +53,7 @@ class TodoPalPlugin(Star):
         self._last_rollover_date = ""
         self._last_summary_sent = {}
         self._last_send_error = ""
+        self._last_file_send_error = ""
 
     async def terminate(self):
         task = getattr(self, "_cron_task", None)
@@ -218,8 +220,12 @@ class TodoPalPlugin(Star):
     @staticmethod
     def _safe_path_segment(value: str) -> str:
         text = str(value or "").strip()
-        safe = "".join(ch for ch in text if ch.isalnum() or ch in ("_", "-"))
-        return safe or "unknown"
+        safe = re.sub(r"[^A-Za-z0-9_-]+", "", text)
+        if safe:
+            return safe
+        if not text:
+            return "unknown"
+        return f"u{hashlib.sha1(text.encode('utf-8')).hexdigest()[:12]}"
 
     def _ics_export_dir(self, platform: str, user_id: str) -> Path:
         return self.storage.base_path / "_ics_exports" / self._safe_path_segment(platform) / self._safe_path_segment(user_id)
@@ -334,11 +340,16 @@ class TodoPalPlugin(Star):
     async def _send_file_via_tool(self, origin: str, file_path: str, file_name: str = "") -> bool:
         local_path = str(file_path or "").strip()
         if not origin or not local_path:
+            self._last_file_send_error = "invalid payload"
             return False
+        self._last_file_send_error = ""
         path_obj = Path(local_path)
         if not path_obj.is_absolute():
             path_obj = (Path.cwd() / path_obj).resolve()
         local_path = str(path_obj)
+        if not path_obj.exists():
+            self._last_file_send_error = f"file not exists: {local_path}"
+            return False
         file_uri = ""
         try:
             file_uri = path_obj.as_uri()
@@ -364,7 +375,9 @@ class TodoPalPlugin(Star):
                         result = await self._call_maybe_async(direct_method, **payload)
                         if self._is_send_result_success(result):
                             return True
-                    except Exception:
+                        self._last_file_send_error = f"direct non-success payload_keys={list(payload.keys())}, result={result}"
+                    except Exception as e:
+                        self._last_file_send_error = f"direct exception payload_keys={list(payload.keys())}: {e}"
                         continue
         tool_executor = self._get_tool_executor()
         if not callable(tool_executor):
@@ -380,8 +393,11 @@ class TodoPalPlugin(Star):
                     result = await self._call_tool_executor(tool_executor, "send_message_to_user", payload)
                     if self._is_send_result_success(result):
                         return True
-                except Exception:
+                    self._last_file_send_error = f"tool non-success payload_keys={list(payload.keys())}, result={result}"
+                except Exception as e:
+                    self._last_file_send_error = f"tool exception payload_keys={list(payload.keys())}: {e}"
                     continue
+        logger.warning(f"send_file_via_tool failed: {self._last_file_send_error or 'unknown'}, path={local_path}")
         return False
 
     async def _send_ics_file_to_origin(self, origin: str, file_path: str, file_name: str = "") -> bool:
@@ -410,7 +426,7 @@ class TodoPalPlugin(Star):
         file_name = Path(file_path).name
         sent = await self._send_ics_file_to_origin(origin, file_path, file_name)
         if not sent:
-            await self._send_text_to_origin(origin, f"今日总表 ICS 已生成：{file_path}")
+            await self._send_text_to_origin(origin, f"今日总表 ICS 已生成：{file_path}\n文件发送失败原因：{self._last_file_send_error or 'unknown'}")
         self._mark_today_plan_ics_auto_sent(platform, user_id, today_str)
 
     async def _send_single_task_ics_after_add(self, origin: str, platform: str, user_id: str, source_text: str, tasks: list):
@@ -431,7 +447,7 @@ class TodoPalPlugin(Star):
             file_name = Path(file_path).name
             sent = await self._send_ics_file_to_origin(origin, file_path, file_name)
             if not sent:
-                await self._send_text_to_origin(origin, f"任务 ICS 已生成：{file_path}")
+                await self._send_text_to_origin(origin, f"任务 ICS 已生成：{file_path}\n文件发送失败原因：{self._last_file_send_error or 'unknown'}")
 
     @staticmethod
     def _is_unfinished_todo(item: dict) -> bool:
@@ -2509,7 +2525,7 @@ class TodoPalPlugin(Star):
         if sent:
             yield event.plain_result(f"已导出当前总表 ICS（共 {item_count} 项）。")
             return
-        yield event.plain_result(f"已生成当前总表 ICS（共 {item_count} 项）：{file_path}")
+        yield event.plain_result(f"已生成当前总表 ICS（共 {item_count} 项）：{file_path}\n文件发送失败原因：{self._last_file_send_error or 'unknown'}")
 
     @filter.regex(r"^(?:(todo|add|done|undo|undone|撤销完成|取消完成|取消done|fix|check|del|delete|rm)\s*.*|.*\s(?:todo|add|done|undo|undone|撤销完成|取消完成|取消done|fix|check|del|delete|rm)\s*$|(?!(?:确认|取消|[0-9xX,\s，]+)$).*(?:记|待办|任务|清单|列表|今天|明天|后天|周[一二三四五六日天]|星期[一二三四五六日天]).*)$")
     async def todo_parse(self, event: AstrMessageEvent):
