@@ -218,6 +218,12 @@ class TodoPalPlugin(Star):
         return result
 
     @staticmethod
+    def _build_chain_message_result(chain):
+        result = type("TodoPalMessageResult", (), {})()
+        result.chain = chain
+        return result
+
+    @staticmethod
     def _safe_path_segment(value: str) -> str:
         text = str(value or "").strip()
         safe = re.sub(r"[^A-Za-z0-9_-]+", "", text)
@@ -342,6 +348,7 @@ class TodoPalPlugin(Star):
         if not origin or not local_path:
             self._last_file_send_error = "invalid payload"
             return False
+        prior_error = str(self._last_file_send_error or "").strip()
         self._last_file_send_error = "init"
         error_notes = []
         path_obj = Path(local_path)
@@ -389,7 +396,10 @@ class TodoPalPlugin(Star):
         tool_executor = self._get_tool_executor()
         if not callable(tool_executor):
             note = "tool_executor unavailable"
-            self._last_file_send_error = note
+            if prior_error:
+                self._last_file_send_error = f"{prior_error} | {note}"
+            else:
+                self._last_file_send_error = note
             error_notes.append(note)
             if error_notes:
                 logger.warning(f"send_file_via_tool failed: {' | '.join(error_notes)}, path={local_path}")
@@ -466,19 +476,35 @@ class TodoPalPlugin(Star):
             self._last_file_send_error = "cannot build File component"
             return False
         for chain in candidate_chains:
+            chain_result = self._build_chain_message_result(chain)
             try:
-                await send_method(origin, chain)
+                await send_method(origin, chain_result)
                 return True
             except TypeError:
                 try:
-                    await send_method(umo=origin, message=chain)
+                    await send_method(umo=origin, message=chain_result)
                     return True
                 except Exception as e2:
-                    self._last_file_send_error = f"context.send_message(umo,message=chain): {e2}"
-                    continue
+                    self._last_file_send_error = f"context.send_message(umo,message=chain_result): {e2}"
+                    try:
+                        await send_method(origin, chain)
+                        return True
+                    except Exception as e3:
+                        self._last_file_send_error = f"context.send_message(origin,chain): {e3}"
+                        try:
+                            await send_method(umo=origin, message=chain)
+                            return True
+                        except Exception as e4:
+                            self._last_file_send_error = f"context.send_message(umo,message=chain): {e4}"
+                            continue
             except Exception as e:
-                self._last_file_send_error = f"context.send_message(origin,chain): {e}"
-                continue
+                self._last_file_send_error = f"context.send_message(origin,chain_result): {e}"
+                try:
+                    await send_method(umo=origin, message=chain_result)
+                    return True
+                except Exception as e2:
+                    self._last_file_send_error = f"context.send_message(umo,message=chain_result): {e2}"
+                    continue
         return False
 
     async def _send_ics_file_to_origin(self, origin: str, file_path: str, file_name: str = "") -> bool:
