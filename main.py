@@ -417,9 +417,75 @@ class TodoPalPlugin(Star):
         logger.warning(f"send_file_via_tool failed: {' | '.join(error_notes) if error_notes else self._last_file_send_error}, path={local_path}")
         return False
 
+    async def _send_file_via_context_message(self, origin: str, file_path: str, file_name: str = "") -> bool:
+        local_path = str(file_path or "").strip()
+        if not origin or not local_path:
+            self._last_file_send_error = "invalid payload"
+            return False
+        path_obj = Path(local_path)
+        if not path_obj.is_absolute():
+            path_obj = (Path.cwd() / path_obj).resolve()
+        local_path = str(path_obj)
+        if not path_obj.exists():
+            self._last_file_send_error = f"file not exists: {local_path}"
+            return False
+        send_method = getattr(self.context, "send_message", None)
+        if not callable(send_method):
+            self._last_file_send_error = "context.send_message is not callable"
+            return False
+        resolved_name = str(file_name or "").strip() or path_obj.name
+        try:
+            from astrbot.api import message_components as Comp
+        except Exception as e:
+            self._last_file_send_error = f"import message_components failed: {e}"
+            return False
+        candidate_chains = []
+        try:
+            candidate_chains.append([Comp.File(file=local_path, name=resolved_name)])
+        except Exception:
+            pass
+        try:
+            candidate_chains.append([Comp.File(file=local_path)])
+        except Exception:
+            pass
+        try:
+            candidate_chains.append([Comp.File(path=local_path, name=resolved_name)])
+        except Exception:
+            pass
+        try:
+            candidate_chains.append([Comp.File(path=local_path)])
+        except Exception:
+            pass
+        file_cls = getattr(Comp, "File", None)
+        if file_cls is not None and callable(getattr(file_cls, "fromFileSystem", None)):
+            try:
+                candidate_chains.append([file_cls.fromFileSystem(path=local_path)])
+            except Exception:
+                pass
+        if not candidate_chains:
+            self._last_file_send_error = "cannot build File component"
+            return False
+        for chain in candidate_chains:
+            try:
+                await send_method(origin, chain)
+                return True
+            except TypeError:
+                try:
+                    await send_method(umo=origin, message=chain)
+                    return True
+                except Exception as e2:
+                    self._last_file_send_error = f"context.send_message(umo,message=chain): {e2}"
+                    continue
+            except Exception as e:
+                self._last_file_send_error = f"context.send_message(origin,chain): {e}"
+                continue
+        return False
+
     async def _send_ics_file_to_origin(self, origin: str, file_path: str, file_name: str = "") -> bool:
         if not origin or not file_path:
             return False
+        if await self._send_file_via_context_message(origin, file_path, file_name):
+            return True
         return await self._send_file_via_tool(origin, file_path, file_name)
 
     def _should_send_today_plan_ics_auto(self, platform: str, user_id: str, today_str: str) -> bool:
