@@ -223,6 +223,24 @@ class TodoPalPlugin(Star):
         result.chain = chain
         return result
 
+    def _reply_delay_seconds(self) -> float:
+        raw = self.config.get("todo_reply_delay_seconds", 5)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = 5.0
+        return max(0.0, value)
+
+    async def _delay_once_for_event(self, event: AstrMessageEvent):
+        if event is None:
+            return
+        if getattr(event, "_todopal_delayed_once", False):
+            return
+        setattr(event, "_todopal_delayed_once", True)
+        delay = self._reply_delay_seconds()
+        if delay > 0:
+            await asyncio.sleep(delay)
+
     @staticmethod
     def _safe_path_segment(value: str) -> str:
         text = str(value or "").strip()
@@ -987,12 +1005,27 @@ class TodoPalPlugin(Star):
         fixed_count = int(plan_result.get("fixed_count", 0))
         show_virtual_time = bool(self.config.get("todo_plan_show_virtual_time", False))
         show_priority_level = bool(self.config.get("todo_plan_show_priority_level", True))
+        today = datetime.now().strftime("%Y-%m-%d")
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        after_tomorrow = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d")
+        if target_date == today:
+            title = "今日执行建议"
+            empty_text = "今天的待办都完成啦。"
+        elif target_date == tomorrow:
+            title = "明日执行建议"
+            empty_text = "明天暂未安排待办。"
+        elif target_date == after_tomorrow:
+            title = "后日执行建议"
+            empty_text = "后天暂未安排待办。"
+        else:
+            title = f"{target_date} 执行建议"
+            empty_text = f"{target_date} 暂未安排待办。"
         lines = [
-            "今日执行建议",
+            title,
             f"总计 {total} 项，未完成 {unfinished_count} 项，固定时段 {fixed_count} 项。"
         ]
         if not timeline and not backlog:
-            lines.append("今天的待办都完成啦。")
+            lines.append(empty_text)
             return "\n".join(lines)
         fixed_rows = [row for row in timeline if row.get("kind") == "fixed"]
         flex_rows = [row for row in timeline if row.get("kind") != "fixed"]
@@ -1729,7 +1762,8 @@ class TodoPalPlugin(Star):
         source = str(text or "").strip()
         if not source:
             return "", source
-        hhmm = re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", source)
+        normalized_source = source.replace("：", ":")
+        hhmm = re.search(r"(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)", normalized_source)
         if hhmm:
             hour = int(hhmm.group(1))
             minute = int(hhmm.group(2))
@@ -1745,7 +1779,7 @@ class TodoPalPlugin(Star):
                 hour = 0
             cleaned = (source[:ampm.start()] + source[ampm.end():]).strip()
             return f"{hour:02d}:00", cleaned
-        zh = re.search(r"(凌晨|早上|上午|中午|下午|晚上|今晚|明早|明晚)?\s*([零〇一二两三四五六七八九十\d]{1,3})点(?:(半)|([零〇一二两三四五六七八九十\d]{1,3})分?)?", source)
+        zh = re.search(r"(凌晨|早上|上午|中午|下午|晚上|今晚|明早|明晚)?\s*(?<!周)(?<!星期)([零〇一二两三四五六七八九十\d]{1,3})点(?:(半)|([零〇一二两三四五六七八九十\d]{1,3})分?)?", source)
         if not zh:
             return "", source
         period = (zh.group(1) or "").strip()
@@ -1780,6 +1814,7 @@ class TodoPalPlugin(Star):
         source = str(text or "").strip()
         if not source:
             return None
+        source = source.replace("：", ":")
         hhmm = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", source)
         if hhmm:
             return f"{int(hhmm.group(1)):02d}:{int(hhmm.group(2)):02d}"
@@ -2238,8 +2273,8 @@ class TodoPalPlugin(Star):
         if not source:
             return False
         patterns = [
-            r"\b([01]?\d|2[0-3]):[0-5]\d\b",
-            r"([01]?\d|2[0-3])点([0-5]?\d分?)?",
+            r"(?<!\d)([01]?\d|2[0-3])[：:][0-5]\d(?!\d)",
+            r"([零〇一二两三四五六七八九十\d]{1,3})点([零〇一二两三四五六七八九十\d]{1,3}分?|半)?",
             r"(上午|中午|下午|晚上|凌晨|今晚|明早|明晚)",
             r"\b\d{1,2}(am|pm)\b"
         ]
@@ -2356,10 +2391,11 @@ class TodoPalPlugin(Star):
             return {"ok": False, "action": "add", "error": "EMPTY_CONTENT", "message": self._service_message("add", False, "EMPTY_CONTENT")}
         inferred_date_text = ""
         inferred_time_text = ""
+        cleaned_source_after_date = source_text
         if not str(date_text or "").strip():
-            inferred_date_text, _ = self._extract_date_hint_from_text(source_text)
+            inferred_date_text, cleaned_source_after_date = self._extract_date_hint_from_text(source_text)
         if not str(time_text or "").strip():
-            inferred_time_text, _ = self._extract_time_hint_from_text(source_text)
+            inferred_time_text, _ = self._extract_time_hint_from_text(cleaned_source_after_date or source_text)
         resolved_date_text = str(date_text or inferred_date_text or "").strip()
         resolved_time_text = self._normalize_time_text(str(time_text or inferred_time_text or "").strip()) or ""
         todos = list(parsed_todos) if isinstance(parsed_todos, list) else []
@@ -2620,6 +2656,7 @@ class TodoPalPlugin(Star):
 
     @filter.regex(r"^导出今日[iI][cC][sS]$")
     async def export_today_ics(self, event: AstrMessageEvent):
+        await self._delay_once_for_event(event)
         platform, user_id = self._event_scope(event)
         await self._register_event_user_context(event, platform, user_id)
         today_str = datetime.now().strftime("%Y-%m-%d")
@@ -2644,6 +2681,7 @@ class TodoPalPlugin(Star):
         1. Explicit commands: 'todo', 'add', 'done', 'fix', 'check', 'del', 'delete', 'rm'
         2. Natural language with keywords (defined in triggers.json)
         """
+        await self._delay_once_for_event(event)
         message_str = event.message_str.strip()
         if not message_str:
             return
@@ -2788,6 +2826,7 @@ class TodoPalPlugin(Star):
 
     @filter.regex(r"^(标签|tag)\s*.*")
     async def manage_tags(self, event: AstrMessageEvent):
+        await self._delay_once_for_event(event)
         message = event.message_str.strip()
         if not message:
             return
@@ -2852,6 +2891,7 @@ class TodoPalPlugin(Star):
 
     @filter.regex(r"^(sub|subscribe|订阅提醒|取消提醒|提醒订阅|提醒诊断)\s*.*")
     async def reminder_subscription(self, event: AstrMessageEvent):
+        await self._delay_once_for_event(event)
         message_str = event.message_str.strip()
         if not message_str:
             return
@@ -2928,6 +2968,7 @@ class TodoPalPlugin(Star):
         """
         Handle confirmation or choice selection.
         """
+        await self._delay_once_for_event(event)
         session = self.sessions.get(event.unified_msg_origin)
         if not session:
             # Not in a session, ignore or let other plugins handle
