@@ -200,7 +200,8 @@ class TodoPalPlugin(Star):
             return result
         if isinstance(result, str):
             text = result.strip().lower()
-            return "message sent to session" in text
+            success_keywords = ("message sent to session", "success", "succeed", "sent", "ok", "发送成功")
+            return any(keyword in text for keyword in success_keywords)
         if isinstance(result, dict):
             for key in ("ok", "success", "succeed"):
                 if key in result:
@@ -344,13 +345,12 @@ class TodoPalPlugin(Star):
         except Exception:
             file_uri = ""
         session_id = self._origin_session_id(origin)
-        resolved_name = str(file_name or "").strip() or Path(local_path).name
+        _ = str(file_name or "").strip()
         payload_messages = [
-            [{"type": "file", "path": local_path, "name": resolved_name}],
-            [{"type": "file", "file": local_path, "name": resolved_name}]
+            [{"type": "file", "path": local_path}]
         ]
         if file_uri:
-            payload_messages.append([{"type": "file", "url": file_uri, "name": resolved_name}])
+            payload_messages.append([{"type": "file", "url": file_uri}])
         direct_method = getattr(self.context, "send_message_to_user", None)
         if callable(direct_method):
             for message_payload in payload_messages:
