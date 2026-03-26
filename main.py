@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import asyncio
 import inspect
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from astrbot.api.message_components import Plain
 
 try:
@@ -213,6 +213,215 @@ class TodoPalPlugin(Star):
         result = type("TodoPalMessageResult", (), {})()
         result.chain = [Plain(text)]
         return result
+
+    @staticmethod
+    def _safe_path_segment(value: str) -> str:
+        text = str(value or "").strip()
+        safe = "".join(ch for ch in text if ch.isalnum() or ch in ("_", "-"))
+        return safe or "unknown"
+
+    def _ics_export_dir(self, platform: str, user_id: str) -> Path:
+        return self.storage.base_path / "_ics_exports" / self._safe_path_segment(platform) / self._safe_path_segment(user_id)
+
+    @staticmethod
+    def _ics_escape(text: str) -> str:
+        value = str(text or "")
+        value = value.replace("\\", "\\\\")
+        value = value.replace("\r\n", "\\n").replace("\n", "\\n")
+        value = value.replace(",", "\\,").replace(";", "\\;")
+        return value
+
+    @staticmethod
+    def _ics_dtstamp_utc() -> str:
+        return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    def _render_ics_event_lines(self, item: dict, index: int = 0) -> list:
+        date_text = str(item.get("date", "") or "").strip()
+        content = str(item.get("content", "") or "").strip() or "待办事项"
+        todo_id = str(item.get("id", "") or "").strip()
+        uid_raw = todo_id or f"{date_text}-{index}-{content}"
+        uid = f"{self._safe_path_segment(uid_raw)}@todopal"
+        lines = [
+            "BEGIN:VEVENT",
+            f"UID:{uid}",
+            f"DTSTAMP:{self._ics_dtstamp_utc()}",
+            f"SUMMARY:{self._ics_escape(content)}"
+        ]
+        status = str(item.get("status", "pending") or "pending")
+        tag_name = str(item.get("tag_name", "") or "").strip()
+        desc_parts = [f"状态: {status}"]
+        if tag_name:
+            desc_parts.append(f"标签: {tag_name}")
+        lines.append(f"DESCRIPTION:{self._ics_escape('；'.join(desc_parts))}")
+        if tag_name:
+            lines.append(f"CATEGORIES:{self._ics_escape(tag_name)}")
+        try:
+            date_obj = datetime.strptime(date_text, "%Y-%m-%d")
+        except ValueError:
+            lines.append("END:VEVENT")
+            return lines
+        time_text = str(item.get("time", "") or "").strip()
+        time_match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", time_text)
+        if not time_match:
+            start_date = date_obj.strftime("%Y%m%d")
+            end_date = (date_obj + timedelta(days=1)).strftime("%Y%m%d")
+            lines.append(f"DTSTART;VALUE=DATE:{start_date}")
+            lines.append(f"DTEND;VALUE=DATE:{end_date}")
+            lines.append("END:VEVENT")
+            return lines
+        hour = int(time_match.group(1))
+        minute = int(time_match.group(2))
+        start_dt = date_obj.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        end_dt = start_dt + timedelta(minutes=30)
+        lines.append(f"DTSTART;TZID=Asia/Shanghai:{start_dt.strftime('%Y%m%dT%H%M%S')}")
+        lines.append(f"DTEND;TZID=Asia/Shanghai:{end_dt.strftime('%Y%m%dT%H%M%S')}")
+        lines.append("END:VEVENT")
+        return lines
+
+    def _build_ics_content(self, calendar_name: str, items: list) -> str:
+        lines = [
+            "BEGIN:VCALENDAR",
+            "VERSION:2.0",
+            "PRODID:-//TodoPal//CN",
+            "CALSCALE:GREGORIAN",
+            "METHOD:PUBLISH",
+            f"X-WR-CALNAME:{self._ics_escape(calendar_name)}",
+            "X-WR-TIMEZONE:Asia/Shanghai"
+        ]
+        for idx, item in enumerate(items or [], 1):
+            if not isinstance(item, dict):
+                continue
+            lines.extend(self._render_ics_event_lines(item, idx))
+        lines.append("END:VCALENDAR")
+        return "\r\n".join(lines) + "\r\n"
+
+    def _collect_today_plan_items(self, platform: str, user_id: str, target_date: str) -> list:
+        todos = self.storage.load_todos(platform, user_id, target_date)
+        pending = [dict(t) for t in todos if self._is_unfinished_todo(t)]
+        def _sort_key(item):
+            time_text = str(item.get("time", "") or "").strip()
+            minute = self._parse_hhmm_minutes(time_text)
+            return (
+                minute is None,
+                minute if minute is not None else 10 ** 9,
+                str(item.get("content", "") or "")
+            )
+        pending.sort(key=_sort_key)
+        return pending
+
+    def _build_today_plan_ics_file(self, platform: str, user_id: str, target_date: str):
+        items = self._collect_today_plan_items(platform, user_id, target_date)
+        file_name = f"today-plan-{target_date}.ics"
+        export_dir = self._ics_export_dir(platform, user_id)
+        export_dir.mkdir(parents=True, exist_ok=True)
+        file_path = export_dir / file_name
+        content = self._build_ics_content(f"今日总表 {target_date}", items)
+        file_path.write_text(content, encoding="utf-8")
+        return str(file_path), len(items)
+
+    def _build_single_task_ics_file(self, platform: str, user_id: str, task_item: dict):
+        item = dict(task_item or {})
+        task_id = str(item.get("id", "") or "").strip() or uuid.uuid4().hex[:8]
+        file_name = f"task-{task_id}.ics"
+        export_dir = self._ics_export_dir(platform, user_id)
+        export_dir.mkdir(parents=True, exist_ok=True)
+        file_path = export_dir / file_name
+        content = self._build_ics_content(f"任务 {task_id}", [item])
+        file_path.write_text(content, encoding="utf-8")
+        return str(file_path)
+
+    async def _send_file_via_tool(self, origin: str, file_path: str, file_name: str = "") -> bool:
+        local_path = str(file_path or "").strip()
+        if not origin or not local_path:
+            return False
+        session_id = self._origin_session_id(origin)
+        resolved_name = str(file_name or "").strip() or Path(local_path).name
+        payload_messages = [
+            [{"type": "file", "path": local_path, "name": resolved_name}],
+            [{"type": "file", "file": local_path, "name": resolved_name}],
+            [{"type": "file", "url": Path(local_path).as_uri(), "name": resolved_name}]
+        ]
+        direct_method = getattr(self.context, "send_message_to_user", None)
+        if callable(direct_method):
+            for message_payload in payload_messages:
+                direct_payloads = [
+                    {"messages": message_payload, "unified_msg_origin": origin},
+                    {"messages": message_payload, "session_id": session_id},
+                    {"messages": message_payload}
+                ]
+                for payload in direct_payloads:
+                    try:
+                        result = await self._call_maybe_async(direct_method, **payload)
+                        if self._is_send_result_success(result):
+                            return True
+                    except Exception:
+                        continue
+        tool_executor = self._get_tool_executor()
+        if not callable(tool_executor):
+            return False
+        for message_payload in payload_messages:
+            payloads = [
+                {"messages": message_payload, "unified_msg_origin": origin},
+                {"messages": message_payload, "session_id": session_id},
+                {"messages": message_payload}
+            ]
+            for payload in payloads:
+                try:
+                    result = await self._call_tool_executor(tool_executor, "send_message_to_user", payload)
+                    if self._is_send_result_success(result):
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    async def _send_ics_file_to_origin(self, origin: str, file_path: str, file_name: str = "") -> bool:
+        if not origin or not file_path:
+            return False
+        return await self._send_file_via_tool(origin, file_path, file_name)
+
+    def _should_send_today_plan_ics_auto(self, platform: str, user_id: str, today_str: str) -> bool:
+        user = self.storage.get_user_info(platform, user_id)
+        if not isinstance(user, dict):
+            return True
+        return str(user.get("today_plan_ics_sent_date", "") or "") != today_str
+
+    def _mark_today_plan_ics_auto_sent(self, platform: str, user_id: str, today_str: str):
+        self.storage.update_user_info(platform, user_id, {"today_plan_ics_sent_date": today_str})
+
+    async def _send_today_plan_ics_auto(self, platform: str, user_id: str, origin: str, today_str: str):
+        if not self._should_send_today_plan_ics_auto(platform, user_id, today_str):
+            return
+        try:
+            file_path, _ = self._build_today_plan_ics_file(platform, user_id, today_str)
+        except Exception as e:
+            logger.error(f"Generate today plan ics failed: {e}")
+            await self._send_text_to_origin(origin, "今日任务安排已发送，但本次 ICS 生成失败。")
+            return
+        file_name = Path(file_path).name
+        sent = await self._send_ics_file_to_origin(origin, file_path, file_name)
+        if not sent:
+            await self._send_text_to_origin(origin, f"今日总表 ICS 已生成：{file_path}")
+        self._mark_today_plan_ics_auto_sent(platform, user_id, today_str)
+
+    async def _send_single_task_ics_after_add(self, origin: str, platform: str, user_id: str, source_text: str, tasks: list):
+        if not self._has_explicit_date_expression(source_text):
+            return
+        for item in tasks or []:
+            if not isinstance(item, dict):
+                continue
+            date_text = str(item.get("date", "") or "").strip()
+            if not self._normalize_date_str(date_text):
+                continue
+            try:
+                file_path = self._build_single_task_ics_file(platform, user_id, item)
+            except Exception as e:
+                logger.error(f"Generate single task ics failed: {e}")
+                await self._send_text_to_origin(origin, "任务已保存，但本次 ICS 生成失败。")
+                return
+            file_name = Path(file_path).name
+            sent = await self._send_ics_file_to_origin(origin, file_path, file_name)
+            if not sent:
+                await self._send_text_to_origin(origin, f"任务 ICS 已生成：{file_path}")
 
     @staticmethod
     def _is_unfinished_todo(item: dict) -> bool:
@@ -1732,11 +1941,18 @@ class TodoPalPlugin(Star):
             else:
                 logger.debug(f"Reminder provider unavailable for {platform}/{user_id}, fallback to template")
         actionable_text = self._render_reminder_actionable(todos, pending)
+        sent_main = False
         if not self._resolve_reminder_dual_message_enable():
-            return await self._send_text_to_origin(origin, reminder_text)
+            sent_main = await self._send_text_to_origin(origin, reminder_text)
+            if sent_main:
+                await self._send_today_plan_ics_auto(platform, user_id, origin, today_str)
+            return sent_main
         sent_natural = await self._send_text_to_origin(origin, reminder_text)
         sent_actionable = await self._send_text_to_origin(origin, actionable_text)
-        return sent_natural or sent_actionable
+        sent_main = sent_natural or sent_actionable
+        if sent_main:
+            await self._send_today_plan_ics_auto(platform, user_id, origin, today_str)
+        return sent_main
 
     async def _reply_with_persona(self, event, plain_text: str):
         """Helper to reply with persona if configured, otherwise plain text."""
@@ -2267,6 +2483,24 @@ class TodoPalPlugin(Star):
         result = await self._service_delete(platform, user_id, selector, date)
         yield event.plain_result(self._tool_text_response("delete", result))
 
+    @filter.regex(r"^导出今日[iI][cC][sS]$")
+    async def export_today_ics(self, event: AstrMessageEvent):
+        platform, user_id = self._event_scope(event)
+        await self._register_event_user_context(event, platform, user_id)
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        try:
+            file_path, item_count = self._build_today_plan_ics_file(platform, user_id, today_str)
+        except Exception as e:
+            logger.error(f"Manual export today ics failed: {e}")
+            yield event.plain_result("当前总表导出失败，本次 ICS 生成失败。")
+            return
+        file_name = Path(file_path).name
+        sent = await self._send_ics_file_to_origin(event.unified_msg_origin, file_path, file_name)
+        if sent:
+            yield event.plain_result(f"已导出当前总表 ICS（共 {item_count} 项）。")
+            return
+        yield event.plain_result(f"已生成当前总表 ICS（共 {item_count} 项）：{file_path}")
+
     @filter.regex(r"^(?:(todo|add|done|undo|undone|撤销完成|取消完成|取消done|fix|check|del|delete|rm)\s*.*|.*\s(?:todo|add|done|undo|undone|撤销完成|取消完成|取消done|fix|check|del|delete|rm)\s*$|(?!(?:确认|取消|[0-9xX,\s，]+)$).*(?:记|待办|任务|清单|列表|今天|明天|后天|周[一二三四五六日天]|星期[一二三四五六日天]).*)$")
     async def todo_parse(self, event: AstrMessageEvent):
         """
@@ -2582,6 +2816,7 @@ class TodoPalPlugin(Star):
             if action == "确认":
                 self._save_todos(platform, user_id, todos, source_text, mode=mode)
                 del self.sessions[event.unified_msg_origin]
+                await self._send_single_task_ics_after_add(event.unified_msg_origin, platform, user_id, source_text, todos)
                 yield event.plain_result("已保存待办事项。")
                 return
             parsed, error = self._parse_tag_assignment(action, len(todos), len(tags))
@@ -2597,6 +2832,7 @@ class TodoPalPlugin(Star):
             kept_count = len(selected_todos)
             dropped_text = f"，丢弃 {dropped_count} 项" if dropped_count > 0 else ""
             preview = self._format_preview(selected_todos, include_confirm_prompt=False)
+            await self._send_single_task_ics_after_add(event.unified_msg_origin, platform, user_id, source_text, selected_todos)
             yield event.plain_result(f"已保存 {kept_count} 项待办{dropped_text}。\n\n{preview}")
             return
 
@@ -2605,6 +2841,7 @@ class TodoPalPlugin(Star):
                 mode = session.get('action_type', 'append')
                 self._save_todos(platform, user_id, todos, source_text, mode=mode)
                 del self.sessions[event.unified_msg_origin]
+                await self._send_single_task_ics_after_add(event.unified_msg_origin, platform, user_id, source_text, todos)
                 yield event.plain_result("已保存待办事项。")
             else:
                 yield event.plain_result("请回复“确认”或“取消”。")
@@ -2696,6 +2933,8 @@ class TodoPalPlugin(Star):
         else:
             title = f"{target_date} 待办清单："
             empty_text = f"{target_date} 还没有待办事项哦。"
+        if target_date == today:
+            await self._send_today_plan_ics_auto(platform, user_id, event.unified_msg_origin, today)
         if not todos:
             yield event.plain_result(empty_text)
             return
