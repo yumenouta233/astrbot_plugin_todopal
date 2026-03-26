@@ -342,7 +342,8 @@ class TodoPalPlugin(Star):
         if not origin or not local_path:
             self._last_file_send_error = "invalid payload"
             return False
-        self._last_file_send_error = ""
+        self._last_file_send_error = "init"
+        error_notes = []
         path_obj = Path(local_path)
         if not path_obj.is_absolute():
             path_obj = (Path.cwd() / path_obj).resolve()
@@ -376,11 +377,22 @@ class TodoPalPlugin(Star):
                         if self._is_send_result_success(result):
                             return True
                         self._last_file_send_error = f"direct non-success payload_keys={list(payload.keys())}, result={result}"
+                        error_notes.append(self._last_file_send_error)
                     except Exception as e:
                         self._last_file_send_error = f"direct exception payload_keys={list(payload.keys())}: {e}"
+                        error_notes.append(self._last_file_send_error)
                         continue
+        else:
+            note = "context.send_message_to_user not callable"
+            self._last_file_send_error = note
+            error_notes.append(note)
         tool_executor = self._get_tool_executor()
         if not callable(tool_executor):
+            note = "tool_executor unavailable"
+            self._last_file_send_error = note
+            error_notes.append(note)
+            if error_notes:
+                logger.warning(f"send_file_via_tool failed: {' | '.join(error_notes)}, path={local_path}")
             return False
         for message_payload in payload_messages:
             payloads = [
@@ -394,10 +406,15 @@ class TodoPalPlugin(Star):
                     if self._is_send_result_success(result):
                         return True
                     self._last_file_send_error = f"tool non-success payload_keys={list(payload.keys())}, result={result}"
+                    error_notes.append(self._last_file_send_error)
                 except Exception as e:
                     self._last_file_send_error = f"tool exception payload_keys={list(payload.keys())}: {e}"
+                    error_notes.append(self._last_file_send_error)
                     continue
-        logger.warning(f"send_file_via_tool failed: {self._last_file_send_error or 'unknown'}, path={local_path}")
+        if self._last_file_send_error == "init":
+            self._last_file_send_error = "all attempts exhausted"
+            error_notes.append(self._last_file_send_error)
+        logger.warning(f"send_file_via_tool failed: {' | '.join(error_notes) if error_notes else self._last_file_send_error}, path={local_path}")
         return False
 
     async def _send_ics_file_to_origin(self, origin: str, file_path: str, file_name: str = "") -> bool:
