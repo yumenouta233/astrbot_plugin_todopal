@@ -314,7 +314,7 @@ class TodoPalPlugin(Star):
         file_name = f"today-plan-{target_date}.ics"
         export_dir = self._ics_export_dir(platform, user_id)
         export_dir.mkdir(parents=True, exist_ok=True)
-        file_path = export_dir / file_name
+        file_path = (export_dir / file_name).resolve()
         content = self._build_ics_content(f"今日总表 {target_date}", items)
         file_path.write_text(content, encoding="utf-8")
         return str(file_path), len(items)
@@ -325,7 +325,7 @@ class TodoPalPlugin(Star):
         file_name = f"task-{task_id}.ics"
         export_dir = self._ics_export_dir(platform, user_id)
         export_dir.mkdir(parents=True, exist_ok=True)
-        file_path = export_dir / file_name
+        file_path = (export_dir / file_name).resolve()
         content = self._build_ics_content(f"任务 {task_id}", [item])
         file_path.write_text(content, encoding="utf-8")
         return str(file_path)
@@ -334,13 +334,23 @@ class TodoPalPlugin(Star):
         local_path = str(file_path or "").strip()
         if not origin or not local_path:
             return False
+        path_obj = Path(local_path)
+        if not path_obj.is_absolute():
+            path_obj = (Path.cwd() / path_obj).resolve()
+        local_path = str(path_obj)
+        file_uri = ""
+        try:
+            file_uri = path_obj.as_uri()
+        except Exception:
+            file_uri = ""
         session_id = self._origin_session_id(origin)
         resolved_name = str(file_name or "").strip() or Path(local_path).name
         payload_messages = [
             [{"type": "file", "path": local_path, "name": resolved_name}],
-            [{"type": "file", "file": local_path, "name": resolved_name}],
-            [{"type": "file", "url": Path(local_path).as_uri(), "name": resolved_name}]
+            [{"type": "file", "file": local_path, "name": resolved_name}]
         ]
+        if file_uri:
+            payload_messages.append([{"type": "file", "url": file_uri, "name": resolved_name}])
         direct_method = getattr(self.context, "send_message_to_user", None)
         if callable(direct_method):
             for message_payload in payload_messages:
