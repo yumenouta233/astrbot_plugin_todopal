@@ -2253,6 +2253,22 @@ class TodoPalPlugin(Star):
             return week_date, cleaned_week
         return "", source
 
+    def _date_expression_count(self, text: str) -> int:
+        source = (text or "").strip()
+        if not source:
+            return 0
+        patterns = [
+            r"(今天|明天|后天)",
+            r"(下下周|下周|本周|这周)?\s*(周[一二三四五六日天]|星期[一二三四五六日天])",
+            r"\d{4}[-/]\d{1,2}[-/]\d{1,2}",
+            r"\d{1,2}月\d{1,2}日",
+            r"\b(today|tomorrow|day\s*after\s*tomorrow)\b"
+        ]
+        count = 0
+        for pattern in patterns:
+            count += len(re.findall(pattern, source, re.IGNORECASE))
+        return count
+
     @staticmethod
     def _has_explicit_date_expression(text: str) -> bool:
         source = (text or "").strip()
@@ -2266,6 +2282,30 @@ class TodoPalPlugin(Star):
             r"\b(today|tomorrow|day\s*after\s*tomorrow)\b"
         ]
         return any(re.search(pattern, source, re.IGNORECASE) for pattern in patterns)
+
+    def _clean_todo_content_text(self, text: str) -> str:
+        source = str(text or "").strip()
+        if not source:
+            return ""
+        cleaned = source
+        replace_patterns = [
+            r"\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b",
+            r"\d{1,2}月\d{1,2}日",
+            r"(下下周|下周|本周|这周)?\s*(周[一二三四五六日天]|星期[一二三四五六日天])",
+            r"(今天|明天|后天|今晚|今早|今晨|明早|明晚)",
+            r"(?<!\d)([01]?\d|2[0-3])[：:][0-5]\d(?!\d)",
+            r"([零〇一二两三四五六七八九十\d]{1,3})点([零〇一二两三四五六七八九十\d]{1,3}分?|半)?",
+            r"(上午|中午|下午|晚上|凌晨)\s*(?=([零〇一二两三四五六七八九十\d]{1,3}(点|时)|([01]?\d|2[0-3])[：:][0-5]\d))",
+            r"\b\d{1,2}(am|pm)\b"
+        ]
+        for pattern in replace_patterns:
+            cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^[,，。；;、\s]+", "", cleaned)
+        cleaned = re.sub(r"[,，。；;、]+", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if cleaned:
+            return cleaned
+        return source
 
     @staticmethod
     def _has_explicit_time_expression(text: str) -> bool:
@@ -2293,7 +2333,9 @@ class TodoPalPlugin(Star):
             if isinstance(time_value, str):
                 time_value = self._normalize_time_text(time_value.strip()) or None
             parsed_date = self._normalize_date_str(str(item.get("date", "")).strip()) if item.get("date") else None
-            if allow_date:
+            if explicit_date:
+                item["date"] = explicit_date
+            elif allow_date:
                 item["date"] = parsed_date or default_date
             else:
                 item["date"] = default_date
@@ -2301,6 +2343,8 @@ class TodoPalPlugin(Star):
                 item["time"] = None
             else:
                 item["time"] = time_value or explicit_time
+            cleaned_content = self._clean_todo_content_text(item.get("content", ""))
+            item["content"] = cleaned_content or self._clean_todo_content_text(source_text)
             normalized.append(item)
         return normalized
 
@@ -2393,7 +2437,8 @@ class TodoPalPlugin(Star):
         inferred_time_text = ""
         cleaned_source_after_date = source_text
         if not str(date_text or "").strip():
-            inferred_date_text, cleaned_source_after_date = self._extract_date_hint_from_text(source_text)
+            if self._date_expression_count(source_text) <= 1:
+                inferred_date_text, cleaned_source_after_date = self._extract_date_hint_from_text(source_text)
         if not str(time_text or "").strip():
             inferred_time_text, _ = self._extract_time_hint_from_text(cleaned_source_after_date or source_text)
         resolved_date_text = str(date_text or inferred_date_text or "").strip()
@@ -2405,7 +2450,7 @@ class TodoPalPlugin(Star):
                 todos = [{
                     "date": target_date,
                     "time": (resolved_time_text if resolved_time_text else None),
-                    "content": source_text
+                    "content": self._clean_todo_content_text(cleaned_source_after_date or source_text)
                 }]
             else:
                 provider_id = await self._get_provider_id_from_origin(event.unified_msg_origin)
@@ -2657,21 +2702,7 @@ class TodoPalPlugin(Star):
     @filter.regex(r"^导出今日[iI][cC][sS]$")
     async def export_today_ics(self, event: AstrMessageEvent):
         await self._delay_once_for_event(event)
-        platform, user_id = self._event_scope(event)
-        await self._register_event_user_context(event, platform, user_id)
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        try:
-            file_path, item_count = self._build_today_plan_ics_file(platform, user_id, today_str)
-        except Exception as e:
-            logger.error(f"Manual export today ics failed: {e}")
-            yield event.plain_result("当前总表导出失败，本次 ICS 生成失败。")
-            return
-        file_name = Path(file_path).name
-        sent = await self._send_ics_file_to_origin(event.unified_msg_origin, file_path, file_name)
-        if sent:
-            yield event.plain_result(f"已导出当前总表 ICS（共 {item_count} 项）。")
-            return
-        yield event.plain_result(f"已生成当前总表 ICS（共 {item_count} 项）：{file_path}\n文件发送失败原因：{self._last_file_send_error or 'unknown'}")
+        yield event.plain_result("当前版本已关闭“今日总表 ICS”导出，仅在新增待办后返回单条 ICS。")
 
     @filter.regex(r"^(?:(todo|add|done|undo|undone|撤销完成|取消完成|取消done|fix|check|del|delete|rm)\s*.*|.*\s(?:todo|add|done|undo|undone|撤销完成|取消完成|取消done|fix|check|del|delete|rm)\s*$|(?!(?:确认|取消|[0-9xX,\s，]+)$).*(?:记|待办|任务|清单|列表|今天|明天|后天|周[一二三四五六日天]|星期[一二三四五六日天]).*)$")
     async def todo_parse(self, event: AstrMessageEvent):
@@ -3109,8 +3140,6 @@ class TodoPalPlugin(Star):
         else:
             title = f"{target_date} 待办清单："
             empty_text = f"{target_date} 还没有待办事项哦。"
-        if target_date == today:
-            await self._send_today_plan_ics_auto(platform, user_id, event.unified_msg_origin, today)
         if not todos:
             yield event.plain_result(empty_text)
             return

@@ -57,6 +57,8 @@ async def parse_todo(context: Context, provider_id: str, text: str) -> list:
 2. 每个元素包含 "date" (YYYY-MM-DD), "time" (HH:MM, 如果没有具体时间则为 null), "content" (事项内容)。
 3. 如果用户没有指定日期，根据语境推断，或者默认为今天。
 4. 不要返回任何解释性文字，只返回 JSON。
+5. content 只保留待办动作本身，不能包含“今天/明天/后天/下周/周几/上午/下午/几点”等日期时间词。
+6. 日期和时间信息只能放在 date/time 字段里。
 
 用户输入：
 {text}
@@ -149,6 +151,7 @@ async def analyze_intent(context: Context, provider_id: str, text: str, current_
 3. 当 type = "check" 时：
    - 如果用户提到了明确日期或相对日期（今天/明天/后天），payload 返回 {{"date":"YYYY-MM-DD"}}。
    - 如果没有提日期，payload 返回 null。
+4. 当 type = "add" 时，payload 中每条待办的 content 不能包含日期时间词，日期时间请放在 date/time 字段。
 """
 
     result = await _call_llm_and_parse_json(context, provider_id, prompt, expect_list=False)
