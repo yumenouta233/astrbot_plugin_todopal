@@ -1703,7 +1703,7 @@ class TodoPalPlugin(Star):
         source = str(text or "").strip()
         if not source:
             return "", source
-        matched = re.search(r"(下下周|下周|本周|这周)?\s*(?:周|星期)([一二三四五六日天])", source)
+        matched = re.search(r"(下下周|下周|本周|这周)?\s*(?:周|星期)?([一二三四五六日天])", source)
         if not matched:
             return "", source
         prefix = (matched.group(1) or "").strip()
@@ -2258,7 +2258,7 @@ class TodoPalPlugin(Star):
             return 0
         patterns = [
             r"(今天|明天|后天)",
-            r"(下下周|下周|本周|这周)?\s*(?:周|星期)[一二三四五六日天]",
+            r"(下下周|下周|本周|这周)?\s*(?:周|星期)?[一二三四五六日天]",
             r"\d{4}[-/]\d{1,2}[-/]\d{1,2}",
             r"\d{1,2}月\d{1,2}日",
             r"\b(today|tomorrow|day\s*after\s*tomorrow)\b"
@@ -2275,7 +2275,7 @@ class TodoPalPlugin(Star):
             return False
         patterns = [
             r"(今天|明天|后天)",
-            r"(下下周|下周|本周|这周)?\s*(?:周|星期)[一二三四五六日天]",
+            r"(下下周|下周|本周|这周)?\s*(?:周|星期)?[一二三四五六日天]",
             r"\d{4}[-/]\d{1,2}[-/]\d{1,2}",
             r"\d{1,2}月\d{1,2}日",
             r"\b(today|tomorrow|day\s*after\s*tomorrow)\b"
@@ -2290,9 +2290,9 @@ class TodoPalPlugin(Star):
         replace_patterns = [
             r"\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b",
             r"\d{1,2}月\d{1,2}日",
-            r"(下下周|下周|本周|这周)?\s*(?:周|星期)[一二三四五六日天]",
+            r"(下下周|下周|本周|这周)?\s*(?:周|星期)?[一二三四五六日天]",
             r"(今天|明天|后天|今晚|今早|今晨|明早|明晚)",
-            r"(上午|中午|下午|晚上|凌晨)",
+            r"(早上|上午|中午|下午|晚上|凌晨|今晚|明早|明晚)",
             r"(?<!\d)([01]?\d|2[0-3])[：:][0-5]\d(?!\d)",
             r"([零〇一二两三四五六七八九十\d]{1,3})点([零〇一二两三四五六七八九十\d]{1,3}分?|半)?",
             r"\b\d{1,2}(am|pm)\b"
@@ -2300,6 +2300,7 @@ class TodoPalPlugin(Star):
         for pattern in replace_patterns:
             cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"^[,，。；;、\s]+", "", cleaned)
+        cleaned = re.sub(r"^(上|下)\s+", "", cleaned)
         cleaned = re.sub(r"[,，。；;、]+", " ", cleaned)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         if cleaned:
