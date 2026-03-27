@@ -1703,12 +1703,11 @@ class TodoPalPlugin(Star):
         source = str(text or "").strip()
         if not source:
             return "", source
-        matched = re.search(r"(下下周|下周|本周|这周)?\s*(周[一二三四五六日天]|星期[一二三四五六日天])", source)
+        matched = re.search(r"(下下周|下周|本周|这周)?\s*(?:周|星期)([一二三四五六日天])", source)
         if not matched:
             return "", source
         prefix = (matched.group(1) or "").strip()
-        weekday_token = (matched.group(2) or "").strip()
-        weekday_char = weekday_token[-1] if weekday_token else ""
+        weekday_char = (matched.group(2) or "").strip()
         weekday_map = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
         if weekday_char not in weekday_map:
             return "", source
@@ -2259,7 +2258,7 @@ class TodoPalPlugin(Star):
             return 0
         patterns = [
             r"(今天|明天|后天)",
-            r"(下下周|下周|本周|这周)?\s*(周[一二三四五六日天]|星期[一二三四五六日天])",
+            r"(下下周|下周|本周|这周)?\s*(?:周|星期)[一二三四五六日天]",
             r"\d{4}[-/]\d{1,2}[-/]\d{1,2}",
             r"\d{1,2}月\d{1,2}日",
             r"\b(today|tomorrow|day\s*after\s*tomorrow)\b"
@@ -2276,7 +2275,7 @@ class TodoPalPlugin(Star):
             return False
         patterns = [
             r"(今天|明天|后天)",
-            r"(下下周|下周|本周|这周)?\s*(周[一二三四五六日天]|星期[一二三四五六日天])",
+            r"(下下周|下周|本周|这周)?\s*(?:周|星期)[一二三四五六日天]",
             r"\d{4}[-/]\d{1,2}[-/]\d{1,2}",
             r"\d{1,2}月\d{1,2}日",
             r"\b(today|tomorrow|day\s*after\s*tomorrow)\b"
@@ -2291,11 +2290,11 @@ class TodoPalPlugin(Star):
         replace_patterns = [
             r"\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b",
             r"\d{1,2}月\d{1,2}日",
-            r"(下下周|下周|本周|这周)?\s*(周[一二三四五六日天]|星期[一二三四五六日天])",
+            r"(下下周|下周|本周|这周)?\s*(?:周|星期)[一二三四五六日天]",
             r"(今天|明天|后天|今晚|今早|今晨|明早|明晚)",
+            r"(上午|中午|下午|晚上|凌晨)",
             r"(?<!\d)([01]?\d|2[0-3])[：:][0-5]\d(?!\d)",
             r"([零〇一二两三四五六七八九十\d]{1,3})点([零〇一二两三四五六七八九十\d]{1,3}分?|半)?",
-            r"(上午|中午|下午|晚上|凌晨)\s*(?=([零〇一二两三四五六七八九十\d]{1,3}(点|时)|([01]?\d|2[0-3])[：:][0-5]\d))",
             r"\b\d{1,2}(am|pm)\b"
         ]
         for pattern in replace_patterns:
