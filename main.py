@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import asyncio
 import inspect
+from urllib import request as urllib_request, parse as urllib_parse, error as urllib_error
 from datetime import datetime, timedelta, timezone
 from astrbot.api.message_components import Plain
 
@@ -575,6 +576,148 @@ class TodoPalPlugin(Star):
             sent = await self._send_ics_file_to_origin(origin, file_path, file_name)
             if not sent:
                 await self._send_text_to_origin(origin, f"任务 ICS 已生成：{file_path}\n文件发送失败原因：{self._last_file_send_error or 'unknown'}")
+
+    def _calendar_sync_url(self) -> str:
+        return str(self.config.get("calendar_sync_url", "") or "").strip()
+
+    def _calendar_sync_token(self) -> str:
+        return str(self.config.get("calendar_sync_token", "") or "").strip()
+
+    def _calendar_sync_enabled(self) -> bool:
+        return bool(self._calendar_sync_url() and self._calendar_sync_token())
+
+    def _calendar_sync_timeout_seconds(self) -> int:
+        raw = self.config.get("calendar_sync_timeout_seconds", 8)
+        try:
+            parsed = int(raw)
+            return parsed if parsed > 0 else 8
+        except Exception:
+            return 8
+
+    def _calendar_event_from_todo(self, todo: dict, date_text: str):
+        if not isinstance(todo, dict):
+            return None
+        title = str(todo.get("content", "") or "").strip()
+        if not title:
+            return None
+        event = {
+            "id": str(todo.get("id", "") or "").strip() or f"{date_text}-{uuid.uuid4().hex[:8]}",
+            "title": title,
+            "date": date_text
+        }
+        time_text = self._normalize_time_text(str(todo.get("time", "") or "").strip())
+        if time_text:
+            start_dt = datetime.strptime(f"{date_text} {time_text}", "%Y-%m-%d %H:%M")
+            block_minutes = int(self.config.get("todo_fixed_task_block_minutes", 45) or 45)
+            if block_minutes <= 0:
+                block_minutes = 45
+            end_dt = start_dt + timedelta(minutes=block_minutes)
+            event["start"] = start_dt.strftime("%Y-%m-%dT%H:%M:%S+08:00")
+            event["end"] = end_dt.strftime("%Y-%m-%dT%H:%M:%S+08:00")
+            event["allDay"] = False
+        else:
+            event["allDay"] = True
+        status = str(todo.get("status", "pending") or "pending").strip()
+        tag_name = str(todo.get("tag_name", "") or "").strip()
+        desc_parts = []
+        if tag_name:
+            desc_parts.append(f"标签：{tag_name}")
+        if status:
+            desc_parts.append(f"状态：{status}")
+        source_text = str(todo.get("source_text", "") or "").strip()
+        if source_text:
+            desc_parts.append(f"原始输入：{source_text}")
+        if desc_parts:
+            event["description"] = "；".join(desc_parts)
+        return event
+
+    def _build_calendar_sync_payload_for_dates(self, platform: str, user_id: str, dates: list):
+        normalized_dates = []
+        for raw in dates or []:
+            parsed = self._normalize_date_str(str(raw or "").strip())
+            if parsed and parsed not in normalized_dates:
+                normalized_dates.append(parsed)
+        events = []
+        for date_text in normalized_dates:
+            todos = self.storage.load_todos(platform, user_id, date_text)
+            for todo in todos:
+                event = self._calendar_event_from_todo(todo, date_text)
+                if event:
+                    events.append(event)
+        return {"events": events, "dates": normalized_dates}
+
+    async def _send_calendar_sync_payload(self, payload: dict):
+        if not self._calendar_sync_enabled():
+            return {"ok": False, "enabled": False, "error": "NOT_CONFIGURED", "message": "未配置日历同步地址或Token。"}
+        endpoint = self._calendar_sync_url()
+        token = self._calendar_sync_token()
+        parsed = urllib_parse.urlparse(endpoint)
+        query = urllib_parse.parse_qsl(parsed.query, keep_blank_values=True)
+        query.append(("token", token))
+        url = urllib_parse.urlunparse(parsed._replace(query=urllib_parse.urlencode(query)))
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+            "x-plugin-token": token
+        }
+
+        def _post():
+            req = urllib_request.Request(url=url, data=body, headers=headers, method="POST")
+            timeout = self._calendar_sync_timeout_seconds()
+            try:
+                with urllib_request.urlopen(req, timeout=timeout) as resp:
+                    status_code = int(getattr(resp, "status", 200) or 200)
+                    raw_resp = resp.read().decode("utf-8", errors="ignore")
+                    return {"ok": 200 <= status_code < 300, "enabled": True, "status": status_code, "response": raw_resp}
+            except urllib_error.HTTPError as e:
+                try:
+                    raw_resp = e.read().decode("utf-8", errors="ignore")
+                except Exception:
+                    raw_resp = ""
+                return {"ok": False, "enabled": True, "status": int(e.code or 500), "error": "HTTP_ERROR", "response": raw_resp}
+            except Exception as e:
+                return {"ok": False, "enabled": True, "status": 0, "error": str(e)}
+
+        return await asyncio.to_thread(_post)
+
+    async def _sync_calendar_dates(self, platform: str, user_id: str, dates: list):
+        payload = self._build_calendar_sync_payload_for_dates(platform, user_id, dates)
+        if not payload.get("dates"):
+            return {"ok": True, "enabled": self._calendar_sync_enabled(), "dates": [], "events_count": 0, "message": "没有可同步日期。"}
+        result = await self._send_calendar_sync_payload(payload)
+        result["dates"] = payload.get("dates", [])
+        result["events_count"] = len(payload.get("events", []))
+        return result
+
+    async def _sync_calendar_after_add(self, platform: str, user_id: str, tasks: list):
+        dates = []
+        for item in tasks or []:
+            if not isinstance(item, dict):
+                continue
+            date_text = self._normalize_date_str(str(item.get("date", "") or "").strip())
+            if date_text and date_text not in dates:
+                dates.append(date_text)
+        if not dates:
+            return {"ok": True, "enabled": self._calendar_sync_enabled(), "dates": [], "events_count": 0, "message": "无可同步日期。"}
+        return await self._sync_calendar_dates(platform, user_id, dates)
+
+    async def _sync_calendar_full_history(self, platform: str, user_id: str):
+        all_dates = self.storage.list_user_dates(platform, user_id)
+        return await self._sync_calendar_dates(platform, user_id, all_dates)
+
+    @staticmethod
+    def _calendar_sync_result_text(result: dict) -> str:
+        if not isinstance(result, dict):
+            return ""
+        if not result.get("enabled", False):
+            return "未执行日历同步：请先在配置页填写 calendar_sync_url 与 calendar_sync_token。"
+        if result.get("ok"):
+            return f"日历同步成功：{len(result.get('dates', []))} 个日期，{result.get('events_count', 0)} 条事件。"
+        status = result.get("status", 0)
+        if status:
+            return f"日历同步失败（HTTP {status}）。"
+        return f"日历同步失败：{result.get('error', 'unknown')}。"
 
     @staticmethod
     def _is_unfinished_todo(item: dict) -> bool:
@@ -2460,20 +2603,26 @@ class TodoPalPlugin(Star):
                 if not todos:
                     return {"ok": False, "action": "add", "error": "PARSE_FAILED", "message": self._service_message("add", False, "PARSE_FAILED")}
         todos = self._sanitize_parsed_todos(todos, source_text, resolved_time_text, resolved_date_text)
+        sync_result = None
         if persist:
             self._save_todos(platform, user_id, todos, source_text, mode='append')
+            sync_result = await self._sync_calendar_after_add(platform, user_id, todos)
         grouped = {}
         for todo in todos:
             dt = todo.get("date") or datetime.now().strftime("%Y-%m-%d")
             grouped.setdefault(dt, 0)
             grouped[dt] += 1
+        base_message = self._service_message("add", True, count=len(todos))
+        sync_message = self._calendar_sync_result_text(sync_result)
+        final_message = f"{base_message}\n{sync_message}" if sync_message else base_message
         return {
             "ok": True,
             "action": "add",
             "added_count": len(todos),
             "dates": grouped,
             "items": todos,
-            "message": self._service_message("add", True, count=len(todos))
+            "message": final_message,
+            "calendar_sync": sync_result
         }
 
     async def _service_done(self, platform: str, user_id: str, selector: str, date_text: str = ""):
@@ -2703,6 +2852,14 @@ class TodoPalPlugin(Star):
     async def export_today_ics(self, event: AstrMessageEvent):
         await self._delay_once_for_event(event)
         yield event.plain_result("当前版本已关闭“今日总表 ICS”导出，仅在新增待办后返回单条 ICS。")
+
+    @filter.regex(r"^(同步历史事件|同步历史日历|历史事件同步|日历全量同步)$")
+    async def sync_calendar_history(self, event: AstrMessageEvent):
+        await self._delay_once_for_event(event)
+        platform, user_id = self._event_scope(event)
+        await self._register_event_user_context(event, platform, user_id)
+        result = await self._sync_calendar_full_history(platform, user_id)
+        yield event.plain_result(self._calendar_sync_result_text(result))
 
     @filter.regex(r"^(?:(todo|add|done|undo|undone|撤销完成|取消完成|取消done|fix|check|del|delete|rm)\s*.*|.*\s(?:todo|add|done|undo|undone|撤销完成|取消完成|取消done|fix|check|del|delete|rm)\s*$|(?!(?:确认|取消|[0-9xX,\s，]+)$).*(?:记|待办|任务|清单|列表|今天|明天|后天|周[一二三四五六日天]|星期[一二三四五六日天]).*)$")
     async def todo_parse(self, event: AstrMessageEvent):
@@ -3022,9 +3179,14 @@ class TodoPalPlugin(Star):
             tags = session.get("user_tags") or self._get_user_tags(platform, user_id)
             if action == "确认":
                 self._save_todos(platform, user_id, todos, source_text, mode=mode)
+                sync_result = await self._sync_calendar_after_add(platform, user_id, todos)
                 del self.sessions[event.unified_msg_origin]
                 await self._send_single_task_ics_after_add(event.unified_msg_origin, platform, user_id, source_text, todos)
-                yield event.plain_result("已保存待办事项。")
+                sync_text = self._calendar_sync_result_text(sync_result)
+                response = "已保存待办事项。"
+                if sync_text:
+                    response = f"{response}\n{sync_text}"
+                yield event.plain_result(response)
                 return
             parsed, error = self._parse_tag_assignment(action, len(todos), len(tags))
             if error:
@@ -3036,20 +3198,28 @@ class TodoPalPlugin(Star):
                 yield event.plain_result("本次待办已全部丢弃。")
                 return
             self._save_todos(platform, user_id, selected_todos, source_text, mode=mode)
+            sync_result = await self._sync_calendar_after_add(platform, user_id, selected_todos)
             kept_count = len(selected_todos)
             dropped_text = f"，丢弃 {dropped_count} 项" if dropped_count > 0 else ""
             preview = self._format_preview(selected_todos, include_confirm_prompt=False)
             await self._send_single_task_ics_after_add(event.unified_msg_origin, platform, user_id, source_text, selected_todos)
-            yield event.plain_result(f"已保存 {kept_count} 项待办{dropped_text}。\n\n{preview}")
+            sync_text = self._calendar_sync_result_text(sync_result)
+            sync_block = f"\n{sync_text}" if sync_text else ""
+            yield event.plain_result(f"已保存 {kept_count} 项待办{dropped_text}。{sync_block}\n\n{preview}")
             return
 
         if state == 'WAITING_CONFIRM':
             if action == "确认":
                 mode = session.get('action_type', 'append')
                 self._save_todos(platform, user_id, todos, source_text, mode=mode)
+                sync_result = await self._sync_calendar_after_add(platform, user_id, todos)
                 del self.sessions[event.unified_msg_origin]
                 await self._send_single_task_ics_after_add(event.unified_msg_origin, platform, user_id, source_text, todos)
-                yield event.plain_result("已保存待办事项。")
+                sync_text = self._calendar_sync_result_text(sync_result)
+                response = "已保存待办事项。"
+                if sync_text:
+                    response = f"{response}\n{sync_text}"
+                yield event.plain_result(response)
             else:
                 yield event.plain_result("请回复“确认”或“取消”。")
 

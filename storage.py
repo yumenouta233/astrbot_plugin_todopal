@@ -146,6 +146,22 @@ class TodoStorage:
             # Fallback if date parsing fails, though date_str should come from verified source
             return self.base_path / "unknown" / f"{date_str}.json"
 
+    def list_user_dates(self, platform: str, user_id: str) -> List[str]:
+        safe_platform = "".join(c for c in platform if c.isalnum() or c in ('_', '-'))
+        safe_user_id = "".join(c for c in user_id if c.isalnum() or c in ('_', '-'))
+        user_root = self.base_path / safe_platform / safe_user_id
+        if not user_root.exists():
+            return []
+        dates = set()
+        for file_path in user_root.rglob("*.json"):
+            date_text = file_path.stem
+            try:
+                datetime.strptime(date_text, "%Y-%m-%d")
+                dates.add(date_text)
+            except Exception:
+                continue
+        return sorted(dates)
+
     def ensure_directory(self, file_path: Path):
         """
         Ensure the directory for the file exists.

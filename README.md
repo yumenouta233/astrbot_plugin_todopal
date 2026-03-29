@@ -49,6 +49,7 @@ TodoPal 是一个面向 AstrBot 的待办管理插件，当前版本采用“能
 - `fix <序号> <新内容>`：修改待办
 - `del/delete/rm <序号或内容>`：删除待办（支持批量）
 - `check [今天|明天|后天|YYYY-MM-DD|M月D日]`：查看待办
+- `同步历史事件`：一键推送当前账号历史待办到在线日历服务
 - `sub on/off/list`：提醒订阅开关与状态查询
 - `sub debug/test`：提醒链路诊断（检查触发条件与主动发送通道）
 - `订阅提醒/取消提醒/提醒订阅`：提醒订阅中文命令
@@ -104,6 +105,13 @@ TodoPal 是一个面向 AstrBot 的待办管理插件，当前版本采用“能
 - 若 ICS 生成失败，不影响原有主流程（add 保存）
 - 会返回失败提示：`任务已保存，但本次 ICS 生成失败。`
 
+## 在线日历同步
+
+- `add/todo` 确认保存后会自动同步涉及日期到远端接口
+- 推送接口：`POST /api/plugin/sync`，同时写入 query token + `Authorization: Bearer` + `x-plugin-token`
+- 推送策略：按“日期全量覆盖”同步，自动上传该日期当前全部待办，保证新增后不覆盖丢失旧项
+- 历史补齐命令：`同步历史事件`（会扫描当前用户所有本地日期并全量推送）
+
 ## 数据存储结构
 
 ```text
@@ -143,6 +151,9 @@ data/plugin_data/todopal/
   - 提醒间隔字段使用 `reminder_interval_minutes`（分钟）
   - 提醒文案模式（`reminder_text_mode`：`template` 或 `llm`，默认 `template`）
   - 提醒模板（`reminder_template`，可用占位符：`{pending_count}`、`{pending_preview}`、`{top1}`、`{top2}`、`{top3}`）
+  - 在线日历同步地址（`calendar_sync_url`）
+  - 在线日历同步 Token（`calendar_sync_token`）
+  - 在线日历同步超时（`calendar_sync_timeout_seconds`）
   - 自定义触发词配置（用于兼容旧行为配置）
 - 触发过一次命令或工具调用后，插件会自动刷新用户的 `origin/provider_id` 缓存，降低“有待办但不提醒”的概率
 - 若仍未收到提醒，可先用 `check 今天` 刷新用户上下文，再观察 1~2 个提醒周期
