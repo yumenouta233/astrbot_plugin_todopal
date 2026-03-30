@@ -151,6 +151,11 @@
     "description": "安排表是否展示轻重缓急等级（高优/中优/低优）",
     "default": true
   },
+  "local_ics_push_enable": {
+    "type": "bool",
+    "description": "开启本地ICS文件推送（包含今日总表自动推送与add后单条推送）",
+    "default": true
+  },
   "calendar_sync_url": {
     "type": "string",
     "description": "日历服务同步接口地址（例如 https://your-domain/api/plugin/sync）",

@@ -533,6 +533,9 @@ class TodoPalPlugin(Star):
             return True
         return await self._send_file_via_tool(origin, file_path, file_name)
 
+    def _local_ics_push_enabled(self) -> bool:
+        return bool(self.config.get("local_ics_push_enable", True))
+
     def _should_send_today_plan_ics_auto(self, platform: str, user_id: str, today_str: str) -> bool:
         user = self.storage.get_user_info(platform, user_id)
         if not isinstance(user, dict):
@@ -543,6 +546,8 @@ class TodoPalPlugin(Star):
         self.storage.update_user_info(platform, user_id, {"today_plan_ics_sent_date": today_str})
 
     async def _send_today_plan_ics_auto(self, platform: str, user_id: str, origin: str, today_str: str):
+        if not self._local_ics_push_enabled():
+            return
         if not self._should_send_today_plan_ics_auto(platform, user_id, today_str):
             return
         try:
@@ -558,6 +563,8 @@ class TodoPalPlugin(Star):
         self._mark_today_plan_ics_auto_sent(platform, user_id, today_str)
 
     async def _send_single_task_ics_after_add(self, origin: str, platform: str, user_id: str, source_text: str, tasks: list):
+        if not self._local_ics_push_enabled():
+            return
         if not self._has_explicit_date_expression(source_text):
             return
         for item in tasks or []:
