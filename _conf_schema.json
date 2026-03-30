@@ -165,5 +165,20 @@
     "type": "int",
     "description": "日历同步请求超时时间（秒）",
     "default": 8
+  },
+  "calendar_sync_schedule_unscheduled": {
+    "type": "bool",
+    "description": "同步到日历时为无固定时间任务自动插空生成开始/结束时间",
+    "default": true
+  },
+  "calendar_sync_use_llm_schedule": {
+    "type": "bool",
+    "description": "同步排程时优先使用LLM推理任务轻重缓急与时长",
+    "default": true
+  },
+  "calendar_sync_all_day_fallback": {
+    "type": "bool",
+    "description": "无固定时间任务在无法排程时是否降级为全天事件",
+    "default": true
   }
 }

@@ -594,7 +594,23 @@ class TodoPalPlugin(Star):
         except Exception:
             return 8
 
-    def _calendar_event_from_todo(self, todo: dict, date_text: str):
+    def _calendar_sync_schedule_unscheduled_enabled(self) -> bool:
+        return bool(self.config.get("calendar_sync_schedule_unscheduled", True))
+
+    def _calendar_sync_use_llm_schedule(self) -> bool:
+        return bool(self.config.get("calendar_sync_use_llm_schedule", True))
+
+    def _calendar_sync_all_day_fallback_enabled(self) -> bool:
+        return bool(self.config.get("calendar_sync_all_day_fallback", True))
+
+    @staticmethod
+    def _calendar_iso_from_date_minutes(date_text: str, minute_value: int) -> str:
+        safe_min = max(0, int(minute_value or 0))
+        base_dt = datetime.strptime(f"{date_text} 00:00", "%Y-%m-%d %H:%M")
+        point_dt = base_dt + timedelta(minutes=safe_min)
+        return point_dt.strftime("%Y-%m-%dT%H:%M:%S+08:00")
+
+    def _calendar_event_from_todo(self, todo: dict, date_text: str, scheduled_row: dict = None):
         if not isinstance(todo, dict):
             return None
         title = str(todo.get("content", "") or "").strip()
@@ -615,23 +631,49 @@ class TodoPalPlugin(Star):
             event["start"] = start_dt.strftime("%Y-%m-%dT%H:%M:%S+08:00")
             event["end"] = end_dt.strftime("%Y-%m-%dT%H:%M:%S+08:00")
             event["allDay"] = False
+        elif isinstance(scheduled_row, dict):
+            start_min = int(scheduled_row.get("start", 0) or 0)
+            end_min = int(scheduled_row.get("end", start_min) or start_min)
+            if end_min <= start_min:
+                end_min = start_min + max(15, int(self.config.get("todo_default_flexible_duration_minutes", 30) or 30))
+            event["start"] = self._calendar_iso_from_date_minutes(date_text, start_min)
+            event["end"] = self._calendar_iso_from_date_minutes(date_text, end_min)
+            event["allDay"] = False
         else:
-            event["allDay"] = True
+            if self._calendar_sync_all_day_fallback_enabled():
+                event["allDay"] = True
+            else:
+                default_duration = max(15, int(self.config.get("todo_default_flexible_duration_minutes", 30) or 30))
+                day_start = self._parse_hhmm_minutes(self._normalize_hhmm(str(self.config.get("todo_workday_start", "09:00")), "09:00"))
+                if day_start is None:
+                    day_start = 9 * 60
+                event["start"] = self._calendar_iso_from_date_minutes(date_text, day_start)
+                event["end"] = self._calendar_iso_from_date_minutes(date_text, day_start + default_duration)
+                event["allDay"] = False
         status = str(todo.get("status", "pending") or "pending").strip()
         tag_name = str(todo.get("tag_name", "") or "").strip()
+        source_text = str(todo.get("source_text", "") or "").strip()
+        updated_at = str(todo.get("updated_at", "") or "").strip()
+        if tag_name:
+            event["category"] = tag_name
+        if status:
+            event["status"] = status
+        if source_text:
+            event["rawInput"] = source_text
+        if updated_at:
+            event["updatedAt"] = updated_at
         desc_parts = []
         if tag_name:
             desc_parts.append(f"标签：{tag_name}")
         if status:
             desc_parts.append(f"状态：{status}")
-        source_text = str(todo.get("source_text", "") or "").strip()
         if source_text:
             desc_parts.append(f"原始输入：{source_text}")
         if desc_parts:
             event["description"] = "；".join(desc_parts)
         return event
 
-    def _build_calendar_sync_payload_for_dates(self, platform: str, user_id: str, dates: list):
+    async def _build_calendar_sync_payload_for_dates(self, platform: str, user_id: str, dates: list, event: AstrMessageEvent = None):
         normalized_dates = []
         for raw in dates or []:
             parsed = self._normalize_date_str(str(raw or "").strip())
@@ -640,10 +682,51 @@ class TodoPalPlugin(Star):
         events = []
         for date_text in normalized_dates:
             todos = self.storage.load_todos(platform, user_id, date_text)
+            scheduled_by_id = {}
+            if self._calendar_sync_schedule_unscheduled_enabled() and todos:
+                plan_result = await self._build_plan_result(event, date_text, todos, force_llm_rank=self._calendar_sync_use_llm_schedule())
+                timeline_rows = plan_result.get("timeline", []) or []
+                for row in timeline_rows:
+                    if not isinstance(row, dict):
+                        continue
+                    if str(row.get("kind", "")).strip() != "flex":
+                        continue
+                    item = row.get("item", {}) if isinstance(row.get("item"), dict) else {}
+                    todo_id = str(item.get("id", "") or "").strip()
+                    if todo_id:
+                        scheduled_by_id[todo_id] = row
+                backlog_rows = plan_result.get("backlog", []) or []
+                last_end = 0
+                for row in timeline_rows:
+                    if not isinstance(row, dict):
+                        continue
+                    last_end = max(last_end, int(row.get("end", 0) or 0))
+                day_end = self._parse_hhmm_minutes(self._normalize_hhmm(str(self.config.get("todo_workday_end", "22:00")), "22:00"))
+                if day_end is None:
+                    day_end = 22 * 60
+                cursor = max(day_end, last_end)
+                for row in backlog_rows:
+                    if not isinstance(row, dict):
+                        continue
+                    item = row.get("item", {}) if isinstance(row.get("item"), dict) else {}
+                    todo_id = str(item.get("id", "") or "").strip()
+                    if not todo_id:
+                        continue
+                    duration = int(row.get("duration", 0) or 0)
+                    duration = max(15, duration if duration > 0 else int(self.config.get("todo_default_flexible_duration_minutes", 30) or 30))
+                    scheduled_by_id[todo_id] = {
+                        "start": cursor,
+                        "end": cursor + duration,
+                        "priority": int(row.get("priority", 0) or 0),
+                        "kind": "flex"
+                    }
+                    cursor += duration
             for todo in todos:
-                event = self._calendar_event_from_todo(todo, date_text)
-                if event:
-                    events.append(event)
+                todo_id = str(todo.get("id", "") or "").strip()
+                scheduled_row = scheduled_by_id.get(todo_id)
+                event_payload = self._calendar_event_from_todo(todo, date_text, scheduled_row=scheduled_row)
+                if event_payload:
+                    events.append(event_payload)
         return {"events": events, "dates": normalized_dates}
 
     async def _send_calendar_sync_payload(self, payload: dict):
@@ -681,8 +764,8 @@ class TodoPalPlugin(Star):
 
         return await asyncio.to_thread(_post)
 
-    async def _sync_calendar_dates(self, platform: str, user_id: str, dates: list):
-        payload = self._build_calendar_sync_payload_for_dates(platform, user_id, dates)
+    async def _sync_calendar_dates(self, platform: str, user_id: str, dates: list, event: AstrMessageEvent = None):
+        payload = await self._build_calendar_sync_payload_for_dates(platform, user_id, dates, event=event)
         if not payload.get("dates"):
             return {"ok": True, "enabled": self._calendar_sync_enabled(), "dates": [], "events_count": 0, "message": "没有可同步日期。"}
         result = await self._send_calendar_sync_payload(payload)
@@ -690,7 +773,7 @@ class TodoPalPlugin(Star):
         result["events_count"] = len(payload.get("events", []))
         return result
 
-    async def _sync_calendar_after_add(self, platform: str, user_id: str, tasks: list):
+    async def _sync_calendar_after_add(self, platform: str, user_id: str, tasks: list, event: AstrMessageEvent = None):
         dates = []
         for item in tasks or []:
             if not isinstance(item, dict):
@@ -700,11 +783,11 @@ class TodoPalPlugin(Star):
                 dates.append(date_text)
         if not dates:
             return {"ok": True, "enabled": self._calendar_sync_enabled(), "dates": [], "events_count": 0, "message": "无可同步日期。"}
-        return await self._sync_calendar_dates(platform, user_id, dates)
+        return await self._sync_calendar_dates(platform, user_id, dates, event=event)
 
-    async def _sync_calendar_full_history(self, platform: str, user_id: str):
+    async def _sync_calendar_full_history(self, platform: str, user_id: str, event: AstrMessageEvent = None):
         all_dates = self.storage.list_user_dates(platform, user_id)
-        return await self._sync_calendar_dates(platform, user_id, all_dates)
+        return await self._sync_calendar_dates(platform, user_id, all_dates, event=event)
 
     @staticmethod
     def _calendar_sync_result_text(result: dict) -> str:
@@ -982,10 +1065,13 @@ class TodoPalPlugin(Star):
         duration = 45 if effort >= 3 else 30
         return score, duration
 
-    async def _llm_rank_unscheduled(self, event: AstrMessageEvent, target_date: str, items: list):
-        if not bool(self.config.get("todo_llm_priority_enable", False)):
+    async def _llm_rank_unscheduled(self, event: AstrMessageEvent, target_date: str, items: list, force_enable: bool = False):
+        if (not force_enable) and (not bool(self.config.get("todo_llm_priority_enable", False))):
             return {}
-        provider_id = await self._get_provider_id_from_origin(event.unified_msg_origin)
+        origin = ""
+        if event is not None:
+            origin = str(getattr(event, "unified_msg_origin", "") or "")
+        provider_id = await self._get_provider_id_from_origin(origin)
         if not provider_id:
             return {}
         payload_items = []
@@ -1033,7 +1119,7 @@ class TodoPalPlugin(Star):
         except Exception:
             return {}
 
-    async def _build_plan_result(self, event: AstrMessageEvent, target_date: str, todos: list):
+    async def _build_plan_result(self, event: AstrMessageEvent, target_date: str, todos: list, force_llm_rank: bool = False):
         unfinished = [item for item in todos if self._is_unfinished_todo(item)]
         if not unfinished:
             return {
@@ -1072,7 +1158,7 @@ class TodoPalPlugin(Star):
         tag_order = self._tag_order_map()
         fixed.sort(key=lambda x: (x.get("_minute", 0), tag_order.get(str(x.get("tag_name", "")).strip(), 999), str(x.get("content", ""))))
 
-        llm_rank = await self._llm_rank_unscheduled(event, target_date, flex)
+        llm_rank = await self._llm_rank_unscheduled(event, target_date, flex, force_enable=force_llm_rank)
         ranked_flex = []
         for idx, item in enumerate(flex):
             if idx in llm_rank:
@@ -1231,7 +1317,7 @@ class TodoPalPlugin(Star):
         fixed_rows = _merge_duplicate_rows(fixed_rows)
         flex_rows = _merge_duplicate_rows(flex_rows)
         merged_hidden_count = max(0, original_timeline_count - len(fixed_rows) - len(flex_rows))
-        flex_rows.sort(key=lambda row: (tag_order.get(_row_tag_name(row), 999), -int(row.get("priority", 0)), str((row.get("item", {}) or {}).get("content", ""))))
+        flex_rows.sort(key=lambda row: (tag_order.get(_row_tag_name(row), 999), int(row.get("start", 0) or 0), -int(row.get("priority", 0)), str((row.get("item", {}) or {}).get("content", ""))))
         if fixed_rows:
             lines.append("")
             lines.append("固定时段任务：")
@@ -2606,7 +2692,7 @@ class TodoPalPlugin(Star):
         sync_result = None
         if persist:
             self._save_todos(platform, user_id, todos, source_text, mode='append')
-            sync_result = await self._sync_calendar_after_add(platform, user_id, todos)
+            sync_result = await self._sync_calendar_after_add(platform, user_id, todos, event=event)
         grouped = {}
         for todo in todos:
             dt = todo.get("date") or datetime.now().strftime("%Y-%m-%d")
@@ -2625,7 +2711,7 @@ class TodoPalPlugin(Star):
             "calendar_sync": sync_result
         }
 
-    async def _service_done(self, platform: str, user_id: str, selector: str, date_text: str = ""):
+    async def _service_done(self, platform: str, user_id: str, selector: str, date_text: str = "", event: AstrMessageEvent = None):
         target_date = self._resolve_date_input(date_text)
         todos = self.storage.load_todos(platform, user_id, target_date)
         if not todos:
@@ -2638,16 +2724,21 @@ class TodoPalPlugin(Star):
             if todos[idx].get("status") != "done":
                 self.storage.update_todo_status(platform, user_id, target_date, idx, "done")
                 updated.append(idx + 1)
+        sync_result = await self._sync_calendar_dates(platform, user_id, [target_date], event=event)
+        sync_text = self._calendar_sync_result_text(sync_result)
+        base_message = self._service_message("done", True, updated_count=len(updated))
+        final_message = f"{base_message}\n{sync_text}" if sync_text else base_message
         return {
             "ok": True,
             "action": "done",
             "date": target_date,
             "updated_indices": updated,
             "updated_count": len(updated),
-            "message": self._service_message("done", True, updated_count=len(updated))
+            "message": final_message,
+            "calendar_sync": sync_result
         }
 
-    async def _service_undone(self, platform: str, user_id: str, selector: str, date_text: str = ""):
+    async def _service_undone(self, platform: str, user_id: str, selector: str, date_text: str = "", event: AstrMessageEvent = None):
         target_date = self._resolve_date_input(date_text)
         todos = self.storage.load_todos(platform, user_id, target_date)
         if not todos:
@@ -2660,16 +2751,21 @@ class TodoPalPlugin(Star):
             if todos[idx].get("status") == "done":
                 self.storage.update_todo_status(platform, user_id, target_date, idx, "pending")
                 updated.append(idx + 1)
+        sync_result = await self._sync_calendar_dates(platform, user_id, [target_date], event=event)
+        sync_text = self._calendar_sync_result_text(sync_result)
+        base_message = self._service_message("undone", True, updated_count=len(updated))
+        final_message = f"{base_message}\n{sync_text}" if sync_text else base_message
         return {
             "ok": True,
             "action": "undone",
             "date": target_date,
             "updated_indices": updated,
             "updated_count": len(updated),
-            "message": self._service_message("undone", True, updated_count=len(updated))
+            "message": final_message,
+            "calendar_sync": sync_result
         }
 
-    async def _service_fix(self, platform: str, user_id: str, index: int, content: str, date_text: str = ""):
+    async def _service_fix(self, platform: str, user_id: str, index: int, content: str, date_text: str = "", event: AstrMessageEvent = None):
         target_date = self._resolve_date_input(date_text)
         todos = self.storage.load_todos(platform, user_id, target_date)
         if not todos:
@@ -2682,6 +2778,10 @@ class TodoPalPlugin(Star):
         updated = self.storage.update_todo_content(platform, user_id, target_date, index - 1, cleaned_content)
         if not updated:
             return {"ok": False, "action": "fix", "date": target_date, "error": "UPDATE_FAILED", "message": self._service_message("fix", False, "UPDATE_FAILED", index=index)}
+        sync_result = await self._sync_calendar_dates(platform, user_id, [target_date], event=event)
+        sync_text = self._calendar_sync_result_text(sync_result)
+        base_message = self._service_message("fix", True, index=index)
+        final_message = f"{base_message}\n{sync_text}" if sync_text else base_message
         return {
             "ok": True,
             "action": "fix",
@@ -2694,10 +2794,11 @@ class TodoPalPlugin(Star):
                 "content": updated.get("content"),
                 "status": updated.get("status", "pending")
             },
-            "message": self._service_message("fix", True, index=index)
+            "message": final_message,
+            "calendar_sync": sync_result
         }
 
-    async def _service_delete(self, platform: str, user_id: str, selector: str, date_text: str = ""):
+    async def _service_delete(self, platform: str, user_id: str, selector: str, date_text: str = "", event: AstrMessageEvent = None):
         target_date = self._resolve_date_input(date_text)
         todos = self.storage.load_todos(platform, user_id, target_date)
         if not todos:
@@ -2720,13 +2821,18 @@ class TodoPalPlugin(Star):
             deleted.reverse()
         if not deleted:
             return {"ok": False, "action": "delete", "date": target_date, "error": "NOT_FOUND", "message": self._service_message("delete", False, "NOT_FOUND")}
+        sync_result = await self._sync_calendar_dates(platform, user_id, [target_date], event=event)
+        sync_text = self._calendar_sync_result_text(sync_result)
+        base_message = self._service_message("delete", True, deleted_count=len(deleted))
+        final_message = f"{base_message}\n{sync_text}" if sync_text else base_message
         return {
             "ok": True,
             "action": "delete",
             "date": target_date,
             "deleted_count": len(deleted),
             "deleted_items": deleted,
-            "message": self._service_message("delete", True, deleted_count=len(deleted))
+            "message": final_message,
+            "calendar_sync": sync_result
         }
 
     def _tool_text_response(self, action: str, result: dict) -> str:
@@ -2805,7 +2911,7 @@ class TodoPalPlugin(Star):
         '''
         platform, user_id = self._event_scope(event)
         await self._register_event_user_context(event, platform, user_id)
-        result = await self._service_done(platform, user_id, selector, date)
+        result = await self._service_done(platform, user_id, selector, date, event=event)
         yield event.plain_result(self._tool_text_response("done", result))
 
     @filter.llm_tool(name="todo_undone")
@@ -2818,7 +2924,7 @@ class TodoPalPlugin(Star):
         '''
         platform, user_id = self._event_scope(event)
         await self._register_event_user_context(event, platform, user_id)
-        result = await self._service_undone(platform, user_id, selector, date)
+        result = await self._service_undone(platform, user_id, selector, date, event=event)
         yield event.plain_result(self._tool_text_response("undone", result))
 
     @filter.llm_tool(name="todo_fix")
@@ -2832,7 +2938,7 @@ class TodoPalPlugin(Star):
         '''
         platform, user_id = self._event_scope(event)
         await self._register_event_user_context(event, platform, user_id)
-        result = await self._service_fix(platform, user_id, index, content, date)
+        result = await self._service_fix(platform, user_id, index, content, date, event=event)
         yield event.plain_result(self._tool_text_response("fix", result))
 
     @filter.llm_tool(name="todo_delete")
@@ -2845,7 +2951,7 @@ class TodoPalPlugin(Star):
         '''
         platform, user_id = self._event_scope(event)
         await self._register_event_user_context(event, platform, user_id)
-        result = await self._service_delete(platform, user_id, selector, date)
+        result = await self._service_delete(platform, user_id, selector, date, event=event)
         yield event.plain_result(self._tool_text_response("delete", result))
 
     @filter.regex(r"^导出今日[iI][cC][sS]$")
@@ -2858,7 +2964,7 @@ class TodoPalPlugin(Star):
         await self._delay_once_for_event(event)
         platform, user_id = self._event_scope(event)
         await self._register_event_user_context(event, platform, user_id)
-        result = await self._sync_calendar_full_history(platform, user_id)
+        result = await self._sync_calendar_full_history(platform, user_id, event=event)
         yield event.plain_result(self._calendar_sync_result_text(result))
 
     @filter.regex(r"^(?:(todo|add|done|undo|undone|撤销完成|取消完成|取消done|fix|check|del|delete|rm)\s*.*|.*\s(?:todo|add|done|undo|undone|撤销完成|取消完成|取消done|fix|check|del|delete|rm)\s*$|(?!(?:确认|取消|[0-9xX,\s，]+)$).*(?:记|待办|任务|清单|列表|今天|明天|后天|周[一二三四五六日天]|星期[一二三四五六日天]).*)$")
@@ -3179,7 +3285,7 @@ class TodoPalPlugin(Star):
             tags = session.get("user_tags") or self._get_user_tags(platform, user_id)
             if action == "确认":
                 self._save_todos(platform, user_id, todos, source_text, mode=mode)
-                sync_result = await self._sync_calendar_after_add(platform, user_id, todos)
+                sync_result = await self._sync_calendar_after_add(platform, user_id, todos, event=event)
                 del self.sessions[event.unified_msg_origin]
                 await self._send_single_task_ics_after_add(event.unified_msg_origin, platform, user_id, source_text, todos)
                 sync_text = self._calendar_sync_result_text(sync_result)
@@ -3198,7 +3304,7 @@ class TodoPalPlugin(Star):
                 yield event.plain_result("本次待办已全部丢弃。")
                 return
             self._save_todos(platform, user_id, selected_todos, source_text, mode=mode)
-            sync_result = await self._sync_calendar_after_add(platform, user_id, selected_todos)
+            sync_result = await self._sync_calendar_after_add(platform, user_id, selected_todos, event=event)
             kept_count = len(selected_todos)
             dropped_text = f"，丢弃 {dropped_count} 项" if dropped_count > 0 else ""
             preview = self._format_preview(selected_todos, include_confirm_prompt=False)
@@ -3212,7 +3318,7 @@ class TodoPalPlugin(Star):
             if action == "确认":
                 mode = session.get('action_type', 'append')
                 self._save_todos(platform, user_id, todos, source_text, mode=mode)
-                sync_result = await self._sync_calendar_after_add(platform, user_id, todos)
+                sync_result = await self._sync_calendar_after_add(platform, user_id, todos, event=event)
                 del self.sessions[event.unified_msg_origin]
                 await self._send_single_task_ics_after_add(event.unified_msg_origin, platform, user_id, source_text, todos)
                 sync_text = self._calendar_sync_result_text(sync_result)
@@ -3254,7 +3360,7 @@ class TodoPalPlugin(Star):
         Handle marking todos as done using the 'done' prefix.
         Matches: "done 1, 2", "done 买菜"
         """
-        result = await self._service_done(platform, user_id, content, "")
+        result = await self._service_done(platform, user_id, content, "", event=event)
         if not result.get("ok"):
             yield event.plain_result(result.get("message", "处理失败，请重试。"))
             return
@@ -3268,7 +3374,7 @@ class TodoPalPlugin(Star):
         yield event.plain_result(f"{result.get('message', '已更新状态。')}\n\n{preview}")
 
     async def _handle_undone_command(self, event: AstrMessageEvent, platform: str, user_id: str, content: str):
-        result = await self._service_undone(platform, user_id, content, "")
+        result = await self._service_undone(platform, user_id, content, "", event=event)
         if not result.get("ok"):
             yield event.plain_result(result.get("message", "处理失败，请重试。"))
             return
@@ -3338,7 +3444,7 @@ class TodoPalPlugin(Star):
             yield event.plain_result("请输入新的待办内容。")
             return
 
-        result = await self._service_fix(platform, user_id, idx, raw_new_content, "")
+        result = await self._service_fix(platform, user_id, idx, raw_new_content, "", event=event)
         if not result.get("ok"):
             yield event.plain_result(result.get("message", "修改失败，请重试。"))
             return
@@ -3356,7 +3462,7 @@ class TodoPalPlugin(Star):
         if not selector:
             yield event.plain_result("请提供要删除的序号或关键词，例如：del 明天 1")
             return
-        result = await self._service_delete(platform, user_id, selector, parsed_date)
+        result = await self._service_delete(platform, user_id, selector, parsed_date, event=event)
         if not result.get("ok"):
             yield event.plain_result(result.get("message", "删除失败，请重试。"))
             return
