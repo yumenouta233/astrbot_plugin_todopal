@@ -3298,11 +3298,11 @@ class TodoPalPlugin(Star):
             return 
 
         action = event.message_str.strip()
-        state = session['state']
-        todos = session['todos']
-        platform = session['platform']
-        user_id = session['user_id']
-        source_text = session.get('source_text', '')
+        state = str(session.get("state", "") or "").strip()
+        todos = session.get("todos") or []
+        platform = str(session.get("platform", "") or "").strip()
+        user_id = str(session.get("user_id", "") or "").strip()
+        source_text = session.get("source_text", "")
 
         if action == "取消":
             del self.sessions[event.unified_msg_origin]
