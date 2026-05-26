@@ -1953,11 +1953,17 @@ class TodoPalPlugin(Star):
         source = str(text or "").strip()
         if not source:
             return "", source
-        matched = re.search(r"(下下周|下周|本周|这周)?\s*(?:周|星期)?([一二三四五六日天])", source)
-        if not matched:
-            return "", source
-        prefix = (matched.group(1) or "").strip()
-        weekday_char = (matched.group(2) or "").strip()
+        matched = re.search(r"(下下周|下周|本周|这周)\s*(?:周|星期)?([一二三四五六日天])", source)
+        prefix = ""
+        weekday_char = ""
+        if matched:
+            prefix = (matched.group(1) or "").strip()
+            weekday_char = (matched.group(2) or "").strip()
+        else:
+            matched = re.search(r"(?:周|星期)\s*([一二三四五六日天])", source)
+            if not matched:
+                return "", source
+            weekday_char = (matched.group(1) or "").strip()
         weekday_map = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
         if weekday_char not in weekday_map:
             return "", source
@@ -2514,7 +2520,7 @@ class TodoPalPlugin(Star):
             return 0
         patterns = [
             r"(今天|明天|后天)",
-            r"(下下周|下周|本周|这周)?\s*(?:周|星期)?[一二三四五六日天]",
+            r"(下下周|下周|本周|这周)\s*(?:周|星期)?[一二三四五六日天]|(?:周|星期)\s*[一二三四五六日天]",
             r"\d{4}[-/]\d{1,2}[-/]\d{1,2}",
             r"\b\d{1,2}[-/]\d{1,2}\b",
             r"\d{1,2}月\d{1,2}日",
@@ -2532,7 +2538,7 @@ class TodoPalPlugin(Star):
             return False
         patterns = [
             r"(今天|明天|后天)",
-            r"(下下周|下周|本周|这周)?\s*(?:周|星期)?[一二三四五六日天]",
+            r"(下下周|下周|本周|这周)\s*(?:周|星期)?[一二三四五六日天]|(?:周|星期)\s*[一二三四五六日天]",
             r"\d{4}[-/]\d{1,2}[-/]\d{1,2}",
             r"\b\d{1,2}[-/]\d{1,2}\b",
             r"\d{1,2}月\d{1,2}日",
