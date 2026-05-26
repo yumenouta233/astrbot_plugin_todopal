@@ -1902,6 +1902,15 @@ class TodoPalPlugin(Star):
                 return datetime(now.year, month, day).strftime("%Y-%m-%d")
             except ValueError:
                 return None
+        md_dash = re.match(r"^(\d{1,2})[-/](\d{1,2})$", txt)
+        if md_dash:
+            now = datetime.now()
+            month = int(md_dash.group(1))
+            day = int(md_dash.group(2))
+            try:
+                return datetime(now.year, month, day).strftime("%Y-%m-%d")
+            except ValueError:
+                return None
         return None
 
     def _resolve_check_date(self, query_text: str = "", payload=None):
@@ -1926,6 +1935,11 @@ class TodoPalPlugin(Star):
         explicit = re.search(r"(\d{4}[-/]\d{1,2}[-/]\d{1,2})", text)
         if explicit:
             parsed = self._normalize_date_str(explicit.group(1))
+            if parsed:
+                return parsed
+        md_dash = re.search(r"\b(\d{1,2}[-/]\d{1,2})\b", text)
+        if md_dash:
+            parsed = self._normalize_date_str(md_dash.group(1))
             if parsed:
                 return parsed
         md = re.search(r"(\d{1,2})月(\d{1,2})日", text)
@@ -2471,6 +2485,12 @@ class TodoPalPlugin(Star):
             parsed = self._normalize_date_str(raw)
             cleaned = (source[:explicit.start()] + source[explicit.end():]).strip()
             return parsed or "", cleaned
+        md_dash = re.search(r"\b(\d{1,2}[-/]\d{1,2})\b", source)
+        if md_dash:
+            raw = md_dash.group(1)
+            parsed = self._normalize_date_str(raw)
+            cleaned = (source[:md_dash.start()] + source[md_dash.end():]).strip()
+            return parsed or "", cleaned
         md = re.search(r"(\d{1,2}月\d{1,2}日)", source)
         if md:
             raw = md.group(1)
@@ -2496,6 +2516,7 @@ class TodoPalPlugin(Star):
             r"(今天|明天|后天)",
             r"(下下周|下周|本周|这周)?\s*(?:周|星期)?[一二三四五六日天]",
             r"\d{4}[-/]\d{1,2}[-/]\d{1,2}",
+            r"\b\d{1,2}[-/]\d{1,2}\b",
             r"\d{1,2}月\d{1,2}日",
             r"\b(today|tomorrow|day\s*after\s*tomorrow)\b"
         ]
@@ -2513,6 +2534,7 @@ class TodoPalPlugin(Star):
             r"(今天|明天|后天)",
             r"(下下周|下周|本周|这周)?\s*(?:周|星期)?[一二三四五六日天]",
             r"\d{4}[-/]\d{1,2}[-/]\d{1,2}",
+            r"\b\d{1,2}[-/]\d{1,2}\b",
             r"\d{1,2}月\d{1,2}日",
             r"\b(today|tomorrow|day\s*after\s*tomorrow)\b"
         ]
@@ -3335,6 +3357,49 @@ class TodoPalPlugin(Star):
                 yield event.plain_result(response)
             else:
                 yield event.plain_result("请回复“确认”或“取消”。")
+            return
+
+        if state == "WAITING_DELETE_CONFIRM":
+            target_date = str(session.get("target_date", "") or "").strip()
+            todo_id = str(session.get("todo_id", "") or "").strip()
+            todo_index = int(session.get("todo_index", 0) or 0)
+            if action in ("0", "取消"):
+                del self.sessions[event.unified_msg_origin]
+                yield event.plain_result("已取消删除。")
+                return
+            if action not in ("1", "确认"):
+                yield event.plain_result("请回复 1 确认删除，或回复 0 取消。")
+                return
+            del self.sessions[event.unified_msg_origin]
+            todos = self.storage.load_todos(platform, user_id, target_date)
+            if not todos:
+                yield event.plain_result("删除失败：该日期下已没有待办事项。")
+                return
+            remove_idx = -1
+            if todo_id:
+                for idx, item in enumerate(todos):
+                    if str(item.get("id", "") or "").strip() == todo_id:
+                        remove_idx = idx
+                        break
+            if remove_idx < 0 and 1 <= todo_index <= len(todos):
+                remove_idx = todo_index - 1
+            if remove_idx < 0 or remove_idx >= len(todos):
+                yield event.plain_result("删除失败：待办已不存在或序号已变化。")
+                return
+            removed = todos.pop(remove_idx)
+            self.storage.save_todos(platform, user_id, target_date, todos)
+            sync_result = await self._sync_calendar_dates(platform, user_id, [target_date], event=event)
+            sync_text = self._calendar_sync_result_text(sync_result)
+            removed_text = str(removed.get("content", "") or "").strip()
+            base = f"已删除：{removed_text}"
+            if sync_text:
+                base = f"{base}\n{sync_text}"
+            if not todos:
+                yield event.plain_result(f"{base}\n\n{target_date} 已没有待办事项。")
+                return
+            preview = self._format_preview(todos, include_confirm_prompt=False)
+            yield event.plain_result(f"{base}\n\n{preview}")
+            return
 
     def _save_todos(self, platform, user_id, todos, source_text, mode='append'):
         # Group by date first
@@ -3440,9 +3505,10 @@ class TodoPalPlugin(Star):
         Handle 'fix' command to modify a specific todo item content.
         Format: fix 3 改成光电数据集会议
         """
-        match = re.match(r"^(\d+)\s*(.*)", content)
+        parsed_date, cleaned_text = self._extract_date_hint_from_text(content)
+        match = re.match(r"^(\d+)\s*(.*)", cleaned_text)
         if not match:
-            yield event.plain_result("格式错误。请使用：fix 序号 新内容\n例如：fix 3 改成光电数据集会议")
+            yield event.plain_result("格式错误。请使用：fix [日期] 序号 新内容\n例如：fix 6-1 3 改成光电数据集会议")
             return
             
         idx = int(match.group(1))
@@ -3451,7 +3517,7 @@ class TodoPalPlugin(Star):
             yield event.plain_result("请输入新的待办内容。")
             return
 
-        result = await self._service_fix(platform, user_id, idx, raw_new_content, "", event=event)
+        result = await self._service_fix(platform, user_id, idx, raw_new_content, parsed_date, event=event)
         if not result.get("ok"):
             yield event.plain_result(result.get("message", "修改失败，请重试。"))
             return
@@ -3469,14 +3535,45 @@ class TodoPalPlugin(Star):
         if not selector:
             yield event.plain_result("请提供要删除的序号或关键词，例如：del 明天 1")
             return
-        result = await self._service_delete(platform, user_id, selector, parsed_date, event=event)
-        if not result.get("ok"):
-            yield event.plain_result(result.get("message", "删除失败，请重试。"))
+        target_date = self._resolve_date_input(parsed_date)
+        todos = self.storage.load_todos(platform, user_id, target_date)
+        if not todos:
+            yield event.plain_result(f"{target_date} 还没有待办事项哦。")
             return
-        target_date = result.get("date", datetime.now().strftime("%Y-%m-%d"))
-        fresh_todos = self.storage.load_todos(platform, user_id, target_date)
-        if not fresh_todos:
-            yield event.plain_result(f"{result.get('message', '已删除待办。')}\n\n{target_date} 已没有待办事项。")
+        matched_indices = TodoMatcher.match_todos(todos, selector or "")
+        if not matched_indices:
+            yield event.plain_result("未找到匹配的待办事项。")
             return
-        preview = self._format_preview(fresh_todos, include_confirm_prompt=False)
-        yield event.plain_result(f"{result.get('message', '已删除待办。')}\n\n{preview}")
+        if len(matched_indices) != 1:
+            lines = ["匹配到多条待办，请用更精确的序号或关键词："]
+            for idx in matched_indices[:10]:
+                item = todos[idx] if 0 <= idx < len(todos) else {}
+                content_text = str(item.get("content", "") or "").strip()
+                time_text = str(item.get("time", "") or "").strip()
+                prefix = f"{time_text} " if time_text else ""
+                lines.append(f"- {idx + 1}. {prefix}{content_text}")
+            yield event.plain_result("\n".join(lines))
+            return
+        idx = matched_indices[0]
+        todo = todos[idx] if 0 <= idx < len(todos) else {}
+        todo_id = str(todo.get("id", "") or "").strip()
+        content_text = str(todo.get("content", "") or "").strip()
+        time_text = str(todo.get("time", "") or "").strip()
+        tag_text = str(todo.get("tag_name", "") or "").strip()
+        tag_block = f"（{tag_text}）" if tag_text else ""
+        prefix = f"{time_text} " if time_text else ""
+        self.sessions[event.unified_msg_origin] = {
+            "state": "WAITING_DELETE_CONFIRM",
+            "platform": platform,
+            "user_id": user_id,
+            "target_date": target_date,
+            "todo_id": todo_id,
+            "todo_index": idx + 1
+        }
+        yield event.plain_result(
+            "确认删除以下待办吗？\n"
+            f"- 日期：{target_date}\n"
+            f"- 序号：{idx + 1}\n"
+            f"- 内容：{prefix}{content_text}{tag_block}\n\n"
+            "回复 1 确认删除，回复 0 取消。"
+        )
