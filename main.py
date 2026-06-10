@@ -1746,6 +1746,10 @@ class TodoPalPlugin(Star):
     def _subscription_default_on(self) -> bool:
         return bool(self.config.get("reminder_subscription_default_on", False))
 
+    def _resolve_reminder_failure_threshold(self) -> int:
+        value = int(self.config.get("reminder_failure_disable_threshold", 3) or 3)
+        return max(1, min(20, value))
+
     def _is_user_reminder_subscribed(self, user: dict) -> bool:
         if not self._subscription_required_for_reminder():
             return True
@@ -1760,6 +1764,52 @@ class TodoPalPlugin(Star):
         self.storage.update_user_info(platform, user_id, {
             "reminder_subscribed": bool(subscribed)
         })
+
+    async def _reset_reminder_delivery_state(self, platform: str, user_id: str):
+        self.storage.update_user_info(platform, user_id, {
+            "reminder_failed_count": 0,
+            "reminder_last_send_error": "",
+            "reminder_delivery_disabled": False
+        })
+
+    async def _handle_reminder_delivery_failure(self, user: dict, platform: str, user_id: str, origin: str):
+        error_text = str(self._last_send_error or "").strip()
+        if not error_text:
+            return
+        threshold = self._resolve_reminder_failure_threshold()
+        current = 0
+        if isinstance(user, dict):
+            try:
+                current = int(user.get("reminder_failed_count", 0) or 0)
+            except Exception:
+                current = 0
+        failed_count = current + 1
+        fields = {
+            "reminder_failed_count": failed_count,
+            "reminder_last_send_error": error_text,
+            "reminder_last_failed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        should_disable = failed_count >= threshold
+        if should_disable:
+            stored_task_id = str((user or {}).get("reminder_task_id", "") or "")
+            if stored_task_id:
+                await self._delete_future_task_by_id(stored_task_id)
+            fields.update({
+                "reminder_subscribed": False,
+                "reminder_delivery_disabled": True,
+                "reminder_delivery_disabled_reason": "send_failed",
+                "origin": "",
+                "provider_id": "",
+                "reminder_task_id": "",
+                "reminder_task_name": self._build_reminder_task_name(platform, user_id),
+                "reminder_signature": "",
+                "reminder_scheduler": "disabled_after_send_failure"
+            })
+        self.storage.update_user_info(platform, user_id, fields)
+        if should_disable:
+            logger.warning(
+                f"Reminder disabled after {failed_count} delivery failures for {platform}/{user_id}: {error_text}"
+            )
 
     def _render_reminder_template(self, pending: list) -> str:
         top_items = [str(t.get("content", "")).strip() for t in pending if str(t.get("content", "")).strip()]
@@ -2267,8 +2317,15 @@ class TodoPalPlugin(Star):
                                 sent = await self._send_proactive_reminder(platform, user_id, origin, today_str, provider_id)
                                 if sent:
                                     last_reminders[user_key] = now
+                                    await self._reset_reminder_delivery_state(platform, user_id)
                                 else:
-                                    logger.warning(f"Reminder attempted but not sent for {platform}/{user_id}")
+                                    if self._last_send_error:
+                                        await self._handle_reminder_delivery_failure(u, platform, user_id, origin)
+                                        logger.warning(
+                                            f"Reminder attempted but not sent for {platform}/{user_id}: {self._last_send_error}"
+                                        )
+                                    else:
+                                        logger.debug(f"Reminder skipped without send failure for {platform}/{user_id}")
                                     
             except Exception as e:
                 logger.error(f"TodoPal cron loop error: {e}")
@@ -2336,6 +2393,7 @@ class TodoPalPlugin(Star):
         pending = [t for t in todos if self._is_unfinished_todo(t)]
         
         if not pending:
+            self._last_send_error = ""
             logger.debug(f"Reminder skipped: no pending todos for {platform}/{user_id} on {today_str}")
             return False
         mode = self._resolve_reminder_text_mode()
