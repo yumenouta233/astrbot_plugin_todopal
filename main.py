@@ -3060,13 +3060,12 @@ class TodoPalPlugin(Star):
         result = await self._sync_calendar_full_history(platform, user_id, event=event)
         yield event.plain_result(self._calendar_sync_result_text(result))
 
-    @filter.regex(r"^(?:(todo|add|done|undo|undone|撤销完成|取消完成|取消done|fix|check|del|delete|rm)\s*.*|.*\s(?:todo|add|done|undo|undone|撤销完成|取消完成|取消done|fix|check|del|delete|rm)\s*$|(?!(?:确认|取消|[0-9xX,\s，]+)$).*(?:记|待办|任务|清单|列表|今天|明天|后天|周[一二三四五六日天]|星期[一二三四五六日天]).*)$")
+    @filter.regex(r"^(todo|add|done|undo|undone|撤销完成|取消完成|取消done|fix|check|del|delete|rm)\s*.*$")
     async def todo_parse(self, event: AstrMessageEvent):
         """
         Parse todo items from user input.
         Supports:
-        1. Explicit commands: 'todo', 'add', 'done', 'fix', 'check', 'del', 'delete', 'rm'
-        2. Natural language with keywords (defined in triggers.json)
+        1. Explicit commands only: 'todo', 'add', 'done', 'fix', 'check', 'del', 'delete', 'rm'
         """
         await self._delay_once_for_event(event)
         message_str = event.message_str.strip()
@@ -3074,16 +3073,11 @@ class TodoPalPlugin(Star):
             return
 
         explicit_match = re.match(r"^(todo|add|done|undo|undone|撤销完成|取消完成|取消done|fix|check|del|delete|rm)\s*(.*)", message_str, re.IGNORECASE)
-        suffix_match = re.match(r"^(.*?)\s+(todo|add|done|undo|undone|撤销完成|取消完成|取消done|fix|check|del|delete|rm)\s*$", message_str, re.IGNORECASE)
         if explicit_match:
             command_prefix = explicit_match.group(1).lower()
             todo_content = explicit_match.group(2).strip()
-        elif suffix_match:
-            command_prefix = suffix_match.group(2).lower()
-            todo_content = suffix_match.group(1).strip()
         else:
-            command_prefix = "todo"
-            todo_content = message_str
+            return
         if command_prefix in ("del", "delete", "rm"):
             command_prefix = "delete"
         if command_prefix in ("undo", "undone", "撤销完成", "取消完成", "取消done"):
